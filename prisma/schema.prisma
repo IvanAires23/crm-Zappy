@@ -1,0 +1,207 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooler (porta 6543) — usado em runtime
+  directUrl = env("DIRECT_URL")   // conexão direta (porta 5432) — usada só pelo prisma migrate
+}
+
+// ------------------------------------------------------------------
+// TENANT — cada cliente que assina o seu CRM
+// ------------------------------------------------------------------
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("trial")
+  status    String   @default("active") // active | suspended | canceled
+  createdAt DateTime @default(now())
+
+  users             User[]
+  contacts          Contact[]
+  conversations     Conversation[]
+  messages          Message[]
+  templates         Template[]
+  whatsappAccounts  TenantWhatsappAccount[]
+  webhookEvents     WebhookEvent[]
+
+  @@map("tenants")
+}
+
+// ------------------------------------------------------------------
+// CONEXÃO WHATSAPP DO TENANT — resultado do Embedded Signup
+// phoneNumberId é a chave que a Meta manda em TODO webhook,
+// é por ela que descobrimos a qual tenant o evento pertence.
+// ------------------------------------------------------------------
+model TenantWhatsappAccount {
+  id                String   @id @default(cuid())
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id])
+
+  wabaId            String   // WhatsApp Business Account ID
+  phoneNumberId     String   @unique // usado para rotear webhooks -> tenant
+  businessId        String?
+  displayPhoneNumber String?
+
+  accessTokenEncrypted String  // token de acesso do tenant, criptografado
+  tokenStatus           String @default("active") // active | revoked | expired
+
+  qualityRating     String?  // GREEN | YELLOW | RED
+  messagingTier     String?
+
+  // Coexistência: número continua ativo no WhatsApp Business App (celular)
+  // além da Cloud API. Ver docs: onboarding-business-app-users.
+  isCoexistence      Boolean  @default(false)
+  platformType       String?  // CLOUD_API | ON_PREMISE (retornado pela Graph API)
+  historySyncStatus  String?  // pending | in_progress | completed | declined | failed
+
+  connectedAt       DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([tenantId])
+  @@map("tenant_whatsapp_accounts")
+}
+
+// ------------------------------------------------------------------
+// USUÁRIOS (atendentes/admins) DE CADA TENANT
+// ------------------------------------------------------------------
+model User {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id])
+
+  name         String
+  email        String
+  passwordHash String
+  role         String   @default("agent") // admin | agent
+
+  createdAt    DateTime @default(now())
+
+  assignedConversations Conversation[] @relation("AssignedAgent")
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("users")
+}
+
+// ------------------------------------------------------------------
+// CONTATOS
+// ------------------------------------------------------------------
+model Contact {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  phone     String   // formato E.164
+  name      String?
+  tags      String[] @default([])
+
+  createdAt DateTime @default(now())
+
+  conversations Conversation[]
+
+  @@unique([tenantId, phone])
+  @@index([tenantId])
+  @@map("contacts")
+}
+
+// ------------------------------------------------------------------
+// CONVERSAS
+// ------------------------------------------------------------------
+model Conversation {
+  id             String   @id @default(cuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+
+  contactId      String
+  contact        Contact  @relation(fields: [contactId], references: [id])
+
+  status         String   @default("open") // open | pending | closed
+  assignedUserId String?
+  assignedUser   User?    @relation("AssignedAgent", fields: [assignedUserId], references: [id])
+
+  lastMessageAt  DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  messages       Message[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("conversations")
+}
+
+// ------------------------------------------------------------------
+// MENSAGENS
+// ------------------------------------------------------------------
+model Message {
+  id                String   @id @default(cuid())
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id])
+
+  conversationId    String
+  conversation      Conversation @relation(fields: [conversationId], references: [id])
+
+  direction         String   // inbound | outbound
+  type              String   // text | image | audio | document | template | ...
+  content           Json     // payload normalizado (texto, mídia, etc.)
+
+  whatsappMessageId String?  @unique // id retornado pela Graph API
+  status            String   @default("pending") // pending | sent | delivered | read | failed
+
+  // De onde a mensagem veio: api (enviada/recebida via Cloud API normal),
+  // business_app (enviada pelo app do celular, em contas com coexistência),
+  // history_sync (importada do histórico antigo no momento da coexistência)
+  source            String   @default("api")
+
+  createdAt         DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([conversationId])
+  @@map("messages")
+}
+
+// ------------------------------------------------------------------
+// TEMPLATES
+// ------------------------------------------------------------------
+model Template {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+
+  name       String
+  category   String
+  language   String   @default("pt_BR")
+  bodyText   String
+  metaStatus String   @default("pending") // pending | approved | rejected
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([tenantId, name, language])
+  @@index([tenantId])
+  @@map("templates")
+}
+
+// ------------------------------------------------------------------
+// WEBHOOK EVENTS — peça de idempotência e auditoria
+// tenantId fica nullable pois, no momento em que o evento chega
+// na fila, ainda não resolvemos a qual tenant ele pertence.
+// ------------------------------------------------------------------
+model WebhookEvent {
+  id                String   @id @default(cuid())
+  tenantId          String?
+  tenant            Tenant?  @relation(fields: [tenantId], references: [id])
+
+  whatsappEventKey  String   @unique // messageId (inbound) ou messageId+status (status update)
+  phoneNumberId     String
+  payload           Json
+  processedAt       DateTime?
+  error             String?
+
+  createdAt         DateTime @default(now())
+
+  @@index([tenantId])
+  @@map("webhook_events")
+}
