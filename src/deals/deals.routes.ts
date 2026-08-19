@@ -2,6 +2,13 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
+import { resolveTagId } from "../tags/findOrCreateTag.js";
+
+const attachTagSchema = z.object({
+  tagId: z.string().min(1).optional(),
+  name: z.string().min(1).max(50).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+});
 
 const createDealSchema = z.object({
   pipelineId: z.string().min(1),
@@ -139,6 +146,7 @@ export async function dealsRoutes(app: FastifyInstance) {
           stage: { select: { id: true, name: true } },
           contact: { select: { id: true, name: true, phone: true } },
           assignedUser: { select: { id: true, name: true } },
+          tags: { include: { tag: true } },
         },
       }),
       prisma.deal.count({ where }),
@@ -158,6 +166,7 @@ export async function dealsRoutes(app: FastifyInstance) {
         stage: { select: { id: true, name: true } },
         contact: true,
         assignedUser: { select: { id: true, name: true, email: true } },
+        tags: { include: { tag: true } },
         stageHistory: {
           orderBy: { movedAt: "desc" },
           take: 20,
@@ -280,6 +289,42 @@ export async function dealsRoutes(app: FastifyInstance) {
     return reply.send(updated);
   });
 
+  app.post("/deals/:id/tags", async (request, reply) => {
+    const { id: dealId } = request.params as { id: string };
+    const tenantId = request.auth.tenantId;
+
+    const parsed = attachTagSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+
+    const deal = await prisma.deal.findFirst({ where: { id: dealId, tenantId } });
+    if (!deal) return reply.status(404).send({ error: "Deal não encontrado" });
+
+    const resolved = await resolveTagId(tenantId, parsed.data);
+    if ("error" in resolved) return reply.status(400).send({ error: resolved.error });
+
+    const link = await prisma.dealTag.upsert({
+      where: { dealId_tagId: { dealId, tagId: resolved.id } },
+      create: { dealId, tagId: resolved.id },
+      update: {},
+      include: { tag: true },
+    });
+
+    return reply.status(201).send(link);
+  });
+
+  app.delete("/deals/:id/tags/:tagId", async (request, reply) => {
+    const { id: dealId, tagId } = request.params as { id: string; tagId: string };
+    const tenantId = request.auth.tenantId;
+
+    const deal = await prisma.deal.findFirst({ where: { id: dealId, tenantId } });
+    if (!deal) return reply.status(404).send({ error: "Deal não encontrado" });
+
+    await prisma.dealTag.deleteMany({ where: { dealId, tagId } });
+    return reply.status(204).send();
+  });
+
   app.delete("/deals/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
@@ -289,6 +334,7 @@ export async function dealsRoutes(app: FastifyInstance) {
 
     await prisma.$transaction([
       prisma.dealStageHistory.deleteMany({ where: { dealId: id } }),
+      prisma.dealTag.deleteMany({ where: { dealId: id } }),
       prisma.deal.delete({ where: { id } }),
     ]);
 

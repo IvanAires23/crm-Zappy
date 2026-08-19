@@ -29,6 +29,7 @@ model Tenant {
   webhookEvents     WebhookEvent[]
   pipelines         Pipeline[]
   deals             Deal[]
+  tags              Tag[]
 
   @@map("tenants")
 }
@@ -100,12 +101,12 @@ model Contact {
 
   phone     String   // formato E.164
   name      String?
-  tags      String[] @default([])
 
   createdAt DateTime @default(now())
 
   conversations Conversation[]
   deals         Deal[]
+  tags          ContactTag[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -301,6 +302,7 @@ model Deal {
   updatedAt      DateTime @updatedAt
 
   stageHistory   DealStageHistory[]
+  tags           DealTag[]
 
   @@index([tenantId])
   @@index([pipelineId, stageId])
@@ -328,4 +330,56 @@ model DealStageHistory {
 
   @@index([dealId])
   @@map("deal_stage_history")
+}
+
+// ------------------------------------------------------------------
+// TAGS — rótulos reutilizáveis por tenant, aplicáveis a Contact e Deal.
+// `slug` é a versão normalizada do nome, usada pra evitar duplicata
+// por diferença de maiúscula/minúscula ("Vip" vs "VIP").
+// ------------------------------------------------------------------
+model Tag {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  name      String
+  slug      String
+  color     String   @default("#6b7280")
+
+  createdAt DateTime @default(now())
+
+  contacts  ContactTag[]
+  deals     DealTag[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId])
+  @@map("tags")
+}
+
+model ContactTag {
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id])
+
+  tagId     String
+  tag       Tag     @relation(fields: [tagId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([contactId, tagId])
+  @@index([tagId])
+  @@map("contact_tags")
+}
+
+model DealTag {
+  dealId    String
+  deal      Deal    @relation(fields: [dealId], references: [id])
+
+  tagId     String
+  tag       Tag     @relation(fields: [tagId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([dealId, tagId])
+  @@index([tagId])
+  @@map("deal_tags")
 }
