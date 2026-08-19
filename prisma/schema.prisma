@@ -27,6 +27,8 @@ model Tenant {
   templates         Template[]
   whatsappAccounts  TenantWhatsappAccount[]
   webhookEvents     WebhookEvent[]
+  pipelines         Pipeline[]
+  deals             Deal[]
 
   @@map("tenants")
 }
@@ -81,6 +83,7 @@ model User {
   createdAt    DateTime @default(now())
 
   assignedConversations Conversation[] @relation("AssignedAgent")
+  assignedDeals         Deal[]         @relation("AssignedDeal")
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -102,6 +105,7 @@ model Contact {
   createdAt DateTime @default(now())
 
   conversations Conversation[]
+  deals         Deal[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -205,4 +209,123 @@ model WebhookEvent {
 
   @@index([tenantId])
   @@map("webhook_events")
+}
+
+// ------------------------------------------------------------------
+// PIPELINES — funis de negociação customizáveis por tenant
+// (ex: "Vendas", "Suporte Premium"). Nunca deletados de verdade,
+// só arquivados, pra preservar o histórico dos deals antigos.
+// ------------------------------------------------------------------
+model Pipeline {
+  id         String    @id @default(cuid())
+  tenantId   String
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
+
+  name       String
+  isDefault  Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  stages     PipelineStage[]
+  deals      Deal[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("pipelines")
+}
+
+// ------------------------------------------------------------------
+// ESTÁGIOS de um pipeline, ordenados. `probability` alimenta previsão
+// de fechamento ponderada (soma de valor * probabilidade do estágio).
+// ------------------------------------------------------------------
+model PipelineStage {
+  id          String   @id @default(cuid())
+  pipelineId  String
+  pipeline    Pipeline @relation(fields: [pipelineId], references: [id])
+
+  name        String
+  order       Int
+  color       String?
+  probability Int?     // 0-100
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  deals            Deal[]
+  historyFromStage DealStageHistory[] @relation("FromStage")
+  historyToStage   DealStageHistory[] @relation("ToStage")
+
+  @@unique([pipelineId, order])
+  @@index([pipelineId])
+  @@map("pipeline_stages")
+}
+
+// ------------------------------------------------------------------
+// DEALS — a negociação em si. Separado do Contact porque um mesmo
+// contato pode ter várias negociações ao longo do tempo.
+// Ganhar/perder é um status independente do estágio (não um estágio
+// terminal), pra poder reabrir um deal perdido sem perder o histórico.
+// ------------------------------------------------------------------
+model Deal {
+  id             String   @id @default(cuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id])
+
+  pipelineId     String
+  pipeline       Pipeline @relation(fields: [pipelineId], references: [id])
+
+  stageId        String
+  stage          PipelineStage @relation(fields: [stageId], references: [id])
+
+  contactId      String?
+  contact        Contact? @relation(fields: [contactId], references: [id])
+
+  title           String
+  valueCents      Int?     // guardado em centavos, evita erro de ponto flutuante
+  currency        String   @default("BRL")
+
+  status          String    @default("open") // open | won | lost
+  lostReason      String?
+  wonAt           DateTime?
+  lostAt          DateTime?
+  expectedCloseAt DateTime?
+
+  assignedUserId String?
+  assignedUser   User?    @relation("AssignedDeal", fields: [assignedUserId], references: [id])
+
+  position       Int      @default(0) // ordenação dentro da coluna do Kanban
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  stageHistory   DealStageHistory[]
+
+  @@index([tenantId])
+  @@index([pipelineId, stageId])
+  @@index([tenantId, status])
+  @@map("deals")
+}
+
+// ------------------------------------------------------------------
+// HISTÓRICO de mudança de estágio de um deal — base pra relatórios
+// futuros do tipo "tempo médio em cada estágio".
+// ------------------------------------------------------------------
+model DealStageHistory {
+  id            String   @id @default(cuid())
+  dealId        String
+  deal          Deal     @relation(fields: [dealId], references: [id])
+
+  fromStageId   String?
+  fromStage     PipelineStage? @relation("FromStage", fields: [fromStageId], references: [id])
+
+  toStageId     String
+  toStage       PipelineStage  @relation("ToStage", fields: [toStageId], references: [id])
+
+  movedByUserId String?
+  movedAt       DateTime @default(now())
+
+  @@index([dealId])
+  @@map("deal_stage_history")
 }

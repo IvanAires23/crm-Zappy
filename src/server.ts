@@ -6,6 +6,8 @@ import { webhookRoutes } from "./webhook/webhook.routes.js";
 import { onboardingRoutes } from "./onboarding/onboarding.routes.js";
 import { authRoutes } from "./auth/auth.routes.js";
 import { conversationsRoutes } from "./conversations/conversations.routes.js";
+import { pipelinesRoutes } from "./pipelines/pipelines.routes.js";
+import { dealsRoutes } from "./deals/deals.routes.js";
 
 const app = Fastify({
   logger: {
@@ -28,6 +30,8 @@ async function main() {
   await app.register(onboardingRoutes);
   await app.register(authRoutes);
   await app.register(conversationsRoutes);
+  await app.register(pipelinesRoutes);
+  await app.register(dealsRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 
