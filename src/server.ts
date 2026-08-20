@@ -10,6 +10,7 @@ import { pipelinesRoutes } from "./pipelines/pipelines.routes.js";
 import { dealsRoutes } from "./deals/deals.routes.js";
 import { tagsRoutes } from "./tags/tags.routes.js";
 import { contactsRoutes } from "./contacts/contacts.routes.js";
+import { tasksRoutes } from "./tasks/tasks.routes.js";
 
 const app = Fastify({
   logger: {
@@ -36,6 +37,7 @@ async function main() {
   await app.register(dealsRoutes);
   await app.register(tagsRoutes);
   await app.register(contactsRoutes);
+  await app.register(tasksRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 

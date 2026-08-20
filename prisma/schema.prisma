@@ -30,6 +30,7 @@ model Tenant {
   pipelines         Pipeline[]
   deals             Deal[]
   tags              Tag[]
+  tasks             Task[]
 
   @@map("tenants")
 }
@@ -85,6 +86,7 @@ model User {
 
   assignedConversations Conversation[] @relation("AssignedAgent")
   assignedDeals         Deal[]         @relation("AssignedDeal")
+  assignedTasks         Task[]         @relation("AssignedTask")
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -107,6 +109,7 @@ model Contact {
   conversations Conversation[]
   deals         Deal[]
   tags          ContactTag[]
+  tasks         Task[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -303,6 +306,7 @@ model Deal {
 
   stageHistory   DealStageHistory[]
   tags           DealTag[]
+  tasks          Task[]
 
   @@index([tenantId])
   @@index([pipelineId, stageId])
@@ -382,4 +386,41 @@ model DealTag {
   @@id([dealId, tagId])
   @@index([tagId])
   @@map("deal_tags")
+}
+
+// ------------------------------------------------------------------
+// TASKS — follow-ups. Nem toda task é sobre um deal específico, por
+// isso contactId e dealId são opcionais e independentes.
+// ------------------------------------------------------------------
+model Task {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  title       String
+  description String?
+  type        String?  // call | whatsapp | email | meeting | other
+
+  contactId   String?
+  contact     Contact? @relation(fields: [contactId], references: [id])
+
+  dealId      String?
+  deal        Deal?    @relation(fields: [dealId], references: [id])
+
+  assignedUserId String?
+  assignedUser   User?  @relation("AssignedTask", fields: [assignedUserId], references: [id])
+
+  dueAt       DateTime
+  priority    String   @default("medium") // low | medium | high
+  status      String   @default("pending") // pending | completed | canceled
+  completedAt DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, status, dueAt])
+  @@index([contactId])
+  @@index([dealId])
+  @@map("tasks")
 }
