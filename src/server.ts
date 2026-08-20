@@ -11,6 +11,7 @@ import { dealsRoutes } from "./deals/deals.routes.js";
 import { tagsRoutes } from "./tags/tags.routes.js";
 import { contactsRoutes } from "./contacts/contacts.routes.js";
 import { tasksRoutes } from "./tasks/tasks.routes.js";
+import { calendarRoutes } from "./calendar/calendar.routes.js";
 
 const app = Fastify({
   logger: {
@@ -38,6 +39,7 @@ async function main() {
   await app.register(tagsRoutes);
   await app.register(contactsRoutes);
   await app.register(tasksRoutes);
+  await app.register(calendarRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 

@@ -31,6 +31,7 @@ model Tenant {
   deals             Deal[]
   tags              Tag[]
   tasks             Task[]
+  calendarEvents    CalendarEvent[]
 
   @@map("tenants")
 }
@@ -87,6 +88,7 @@ model User {
   assignedConversations Conversation[] @relation("AssignedAgent")
   assignedDeals         Deal[]         @relation("AssignedDeal")
   assignedTasks         Task[]         @relation("AssignedTask")
+  assignedCalendarEvents CalendarEvent[] @relation("AssignedCalendarEvent")
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -110,6 +112,7 @@ model Contact {
   deals         Deal[]
   tags          ContactTag[]
   tasks         Task[]
+  calendarEvents CalendarEvent[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -307,6 +310,7 @@ model Deal {
   stageHistory   DealStageHistory[]
   tags           DealTag[]
   tasks          Task[]
+  calendarEvents CalendarEvent[]
 
   @@index([tenantId])
   @@index([pipelineId, stageId])
@@ -423,4 +427,49 @@ model Task {
   @@index([contactId])
   @@index([dealId])
   @@map("tasks")
+}
+
+// ------------------------------------------------------------------
+// CALENDÁRIO — reuniões/compromissos. `reminderMinutesBefore` e
+// `reminderSentAt` já ficam prontos pro futuro worker de lembrete via
+// WhatsApp (ainda não construído — depende de template aprovado pela
+// Meta e de um número WhatsApp de verdade conectado pra testar).
+// ------------------------------------------------------------------
+model CalendarEvent {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  title       String
+  description String?
+
+  startAt     DateTime
+  endAt       DateTime
+  allDay      Boolean  @default(false)
+
+  location    String?
+  meetingUrl  String?
+
+  contactId   String?
+  contact     Contact? @relation(fields: [contactId], references: [id])
+
+  dealId      String?
+  deal        Deal?    @relation(fields: [dealId], references: [id])
+
+  assignedUserId String?
+  assignedUser   User?  @relation("AssignedCalendarEvent", fields: [assignedUserId], references: [id])
+
+  status      String   @default("scheduled") // scheduled | completed | canceled
+
+  reminderMinutesBefore Int?
+  reminderSentAt        DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, startAt])
+  @@index([contactId])
+  @@index([dealId])
+  @@map("calendar_events")
 }
