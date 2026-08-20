@@ -32,6 +32,7 @@ model Tenant {
   tags              Tag[]
   tasks             Task[]
   calendarEvents    CalendarEvent[]
+  broadcasts        Broadcast[]
 
   @@map("tenants")
 }
@@ -113,6 +114,7 @@ model Contact {
   tags          ContactTag[]
   tasks         Task[]
   calendarEvents CalendarEvent[]
+  broadcastRecipients BroadcastRecipient[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -191,9 +193,58 @@ model Template {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
+  broadcasts Broadcast[]
+
   @@unique([tenantId, name, language])
   @@index([tenantId])
   @@map("templates")
+}
+
+// ------------------------------------------------------------------
+// DISPAROS EM MASSA — dispara um template pra uma lista de contatos.
+// Reaproveita a mesma fila/worker de envio (outboundQueue) usada pela
+// conversa individual, só que em modo "template" em vez de texto livre.
+// ------------------------------------------------------------------
+model Broadcast {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  templateId  String
+  template    Template @relation(fields: [templateId], references: [id])
+
+  status      String   @default("draft") // draft | sending | completed | failed
+  totalCount  Int      @default(0)
+  sentCount   Int      @default(0)
+  failedCount Int      @default(0)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  recipients  BroadcastRecipient[]
+
+  @@index([tenantId])
+  @@map("broadcasts")
+}
+
+model BroadcastRecipient {
+  id          String    @id @default(cuid())
+  broadcastId String
+  broadcast   Broadcast @relation(fields: [broadcastId], references: [id])
+
+  contactId   String
+  contact     Contact   @relation(fields: [contactId], references: [id])
+
+  status      String    @default("pending") // pending | sent | failed
+  messageId   String?   @unique
+  error       String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([broadcastId, contactId])
+  @@index([broadcastId])
+  @@map("broadcast_recipients")
 }
 
 // ------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import { Worker, type Job } from "bullmq";
 import { connection } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
-import { sendTextMessage, WhatsappApiError } from "../whatsapp/client.js";
+import { sendTextMessage, sendTemplateMessage } from "../whatsapp/client.js";
 import pino from "pino";
 
 const logger = pino({ transport: { target: "pino-pretty" } });
@@ -10,16 +10,39 @@ interface OutboundJobData {
   tenantId: string;
   messageId: string; // id do registro local em `messages`, criado como "pending" antes de enfileirar
   to: string;
-  text: string;
+  text?: string; // envio de texto livre (conversa individual)
+  template?: { name: string; languageCode: string; components?: unknown[] }; // envio de template (disparo em massa)
+  broadcastRecipientId?: string; // presente só em jobs de disparo em massa
+}
+
+// Depois de marcar um BroadcastRecipient como sent/failed, atualiza os
+// contadores do Broadcast e fecha ele como "completed" quando todo mundo
+// já foi processado (sent + failed == total).
+async function updateBroadcastProgress(broadcastRecipientId: string, outcome: "sent" | "failed", error?: string) {
+  const recipient = await prisma.broadcastRecipient.update({
+    where: { id: broadcastRecipientId },
+    data: { status: outcome, error },
+  });
+
+  const broadcast = await prisma.broadcast.update({
+    where: { id: recipient.broadcastId },
+    data: outcome === "sent" ? { sentCount: { increment: 1 } } : { failedCount: { increment: 1 } },
+  });
+
+  if (broadcast.sentCount + broadcast.failedCount >= broadcast.totalCount) {
+    await prisma.broadcast.update({ where: { id: broadcast.id }, data: { status: "completed" } });
+  }
 }
 
 const worker = new Worker(
   "whatsapp-outbound-messages",
   async (job: Job<OutboundJobData>) => {
-    const { tenantId, messageId, to, text } = job.data;
+    const { tenantId, messageId, to, text, template, broadcastRecipientId } = job.data;
 
     try {
-      const result = await sendTextMessage(tenantId, to, text);
+      const result = template
+        ? await sendTemplateMessage(tenantId, to, template.name, template.languageCode, template.components)
+        : await sendTextMessage(tenantId, to, text ?? "");
       const whatsappMessageId = result?.messages?.[0]?.id;
 
       await prisma.message.update({
@@ -29,10 +52,25 @@ const worker = new Worker(
           whatsappMessageId, // o status final (delivered/read) chega depois via webhook
         },
       });
+
+      if (broadcastRecipientId) {
+        await updateBroadcastProgress(broadcastRecipientId, "sent");
+      }
     } catch (err) {
-      if (err instanceof WhatsappApiError && err.status === 429) {
-        // Rate limit — BullMQ já vai reagendar via backoff exponencial configurado na fila.
-        logger.warn({ tenantId, messageId }, "Rate limit atingido, reenfileirando com backoff");
+      // Só marca como "failed" (mensagem + contador do disparo) na última
+      // tentativa configurada na fila — antes disso é só um retry em
+      // andamento (rate limit ou qualquer outro erro transiente), e marcar
+      // cedo faria o Message/BroadcastRecipient ficarem "failed" mesmo que
+      // uma tentativa seguinte tivesse sucesso (e contaria duas vezes no
+      // disparo em massa).
+      const attemptsAllowed = job.opts.attempts ?? 1;
+      const isLastAttempt = job.attemptsMade + 1 >= attemptsAllowed;
+
+      if (!isLastAttempt) {
+        logger.warn(
+          { tenantId, messageId, attempt: job.attemptsMade + 1, attemptsAllowed },
+          "Falha ao enviar, tentando de novo"
+        );
         throw err;
       }
 
@@ -41,8 +79,12 @@ const worker = new Worker(
         data: { status: "failed" },
       });
 
-      logger.error({ tenantId, messageId, err }, "Falha ao enviar mensagem");
-      throw err; // deixa o BullMQ registrar como failed após esgotar tentativas
+      if (broadcastRecipientId) {
+        await updateBroadcastProgress(broadcastRecipientId, "failed", err instanceof Error ? err.message : String(err));
+      }
+
+      logger.error({ tenantId, messageId, err }, "Falha ao enviar mensagem definitivamente");
+      throw err; // deixa o BullMQ registrar o job como failed
     }
   },
   { connection, concurrency: 5 }
