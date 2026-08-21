@@ -17,6 +17,7 @@ import { automationRulesRoutes } from "./automation/rules.routes.js";
 import { templatesRoutes } from "./templates/templates.routes.js";
 import { broadcastsRoutes } from "./broadcasts/broadcasts.routes.js";
 import { customFieldDefinitionsRoutes } from "./customFields/customFieldDefinitions.routes.js";
+import { dashboardRoutes } from "./dashboard/dashboard.routes.js";
 
 const app = Fastify({
   logger: {
@@ -50,6 +51,7 @@ async function main() {
   await app.register(templatesRoutes);
   await app.register(broadcastsRoutes);
   await app.register(customFieldDefinitionsRoutes);
+  await app.register(dashboardRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 
