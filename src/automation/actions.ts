@@ -11,7 +11,14 @@ export type RuleAction =
       priority?: "low" | "medium" | "high";
       assignedUserId?: string;
     }
-  | { type: "create_deal"; stageId: string; title?: string };
+  | { type: "create_deal"; stageId: string; title?: string }
+  | {
+      type: "call_webhook";
+      url: string;
+      method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+      headers?: Record<string, string>;
+      body?: unknown;
+    };
 
 // Todos os pares de `conditions` precisam bater com `data` (AND simples,
 // comparação exata). `conditions` vazio/ausente = sempre bate.
@@ -19,6 +26,33 @@ export function matchesConditions(data: Record<string, unknown>, conditions: unk
   if (!conditions || typeof conditions !== "object") return true;
 
   return Object.entries(conditions as Record<string, unknown>).every(([key, expected]) => data[key] === expected);
+}
+
+function getByPath(obj: unknown, path: string): unknown {
+  return path.split(".").reduce<unknown>((acc, key) => {
+    if (acc == null || typeof acc !== "object") return undefined;
+    return (acc as Record<string, unknown>)[key];
+  }, obj);
+}
+
+// Substitui "{{campo}}" ou "{{contact.phone}}" (dot-path) pelos valores
+// do evento que disparou a regra. Funciona em strings dentro de qualquer
+// estrutura (objeto, array, ou string solta) — é assim que a URL/corpo
+// de call_webhook conseguem referenciar dados do evento.
+export function interpolate(template: unknown, data: Record<string, unknown>): unknown {
+  if (typeof template === "string") {
+    return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, path: string) => {
+      const value = getByPath(data, path);
+      return value === undefined || value === null ? "" : String(value);
+    });
+  }
+  if (Array.isArray(template)) return template.map((item) => interpolate(item, data));
+  if (template && typeof template === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(template)) result[key] = interpolate(value, data);
+    return result;
+  }
+  return template;
 }
 
 // Executa uma ação de automação. Lança erro (não captura) de propósito —
@@ -120,6 +154,27 @@ export async function executeAction(
           position: (lastInStage?.position ?? -1) + 1,
         },
       });
+      return;
+    }
+
+    case "call_webhook": {
+      const url = interpolate(action.url, eventData) as string;
+      const method = action.method ?? "POST";
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...((action.headers ? (interpolate(action.headers, eventData) as Record<string, string>) : {}) ?? {}),
+      };
+      const body = action.body !== undefined ? JSON.stringify(interpolate(action.body, eventData)) : undefined;
+
+      const res = await fetch(url, {
+        method,
+        headers,
+        ...(method !== "GET" && body !== undefined ? { body } : {}),
+      });
+
+      if (!res.ok) {
+        throw new Error(`call_webhook: ${url} respondeu ${res.status}`);
+      }
       return;
     }
   }

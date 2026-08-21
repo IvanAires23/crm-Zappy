@@ -27,6 +27,20 @@ const actionSchema = z.discriminatedUnion("type", [
     stageId: z.string().min(1),
     title: z.string().min(1).optional(),
   }),
+  z.object({
+    type: z.literal("call_webhook"),
+    // Aceita URL normal OU com {{variavel}} de template — nesse caso
+    // não dá pra validar como URL de verdade antes de substituir.
+    url: z
+      .string()
+      .min(1)
+      .refine((val) => val.includes("{{") || z.string().url().safeParse(val).success, {
+        message: "URL inválida (ou use {{variavel}} pra referenciar dados do evento)",
+      }),
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
+    body: z.unknown().optional(),
+  }),
 ]);
 
 const createRuleSchema = z.object({
@@ -110,7 +124,7 @@ export async function automationRulesRoutes(app: FastifyInstance) {
         name: parsed.data.name,
         triggerEvent: parsed.data.triggerEvent,
         triggerConditions: parsed.data.triggerConditions ?? undefined,
-        actions: parsed.data.actions,
+        actions: parsed.data.actions as unknown as Prisma.InputJsonValue,
         isActive: parsed.data.isActive ?? true,
       },
     });
@@ -161,6 +175,7 @@ export async function automationRulesRoutes(app: FastifyInstance) {
             : parsed.data.triggerConditions === null
               ? Prisma.JsonNull
               : parsed.data.triggerConditions,
+        actions: parsed.data.actions ? (parsed.data.actions as unknown as Prisma.InputJsonValue) : undefined,
       },
     });
 
