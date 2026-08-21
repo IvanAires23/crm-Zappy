@@ -32,7 +32,9 @@ model Tenant {
   tags              Tag[]
   tasks             Task[]
   calendarEvents    CalendarEvent[]
+  automationWebhooks AutomationWebhook[]
   broadcasts        Broadcast[]
+  dealCustomFieldDefinitions DealCustomFieldDefinition[]
 
   @@map("tenants")
 }
@@ -328,6 +330,7 @@ model PipelineStage {
 // ------------------------------------------------------------------
 model Deal {
   id             String   @id @default(cuid())
+  number         Int      @unique @default(autoincrement()) // identificador curto exibido como "Lead #N"
   tenantId       String
   tenant         Tenant   @relation(fields: [tenantId], references: [id])
 
@@ -355,6 +358,8 @@ model Deal {
 
   position       Int      @default(0) // ordenação dentro da coluna do Kanban
 
+  customFields   Json     @default("{}") // { [DealCustomFieldDefinition.id]: valor }
+
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -367,6 +372,27 @@ model Deal {
   @@index([pipelineId, stageId])
   @@index([tenantId, status])
   @@map("deals")
+}
+
+// ------------------------------------------------------------------
+// CAMPOS PERSONALIZADOS — definidos pelo usuário, valem pra todos os
+// leads do tenant. O valor de cada lead fica no Deal.customFields (JSON),
+// chaveado pelo id da definição.
+// ------------------------------------------------------------------
+model DealCustomFieldDefinition {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  name      String
+  type      String   @default("text") // text | number | date
+  order     Int      @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("deal_custom_field_definitions")
 }
 
 // ------------------------------------------------------------------
@@ -470,6 +496,10 @@ model Task {
   status      String   @default("pending") // pending | completed | canceled
   completedAt DateTime?
 
+  // Marca quando o scheduler já emitiu o evento "task.overdue" pra essa
+  // task, pra não disparar de novo a cada varredura.
+  overdueNotifiedAt DateTime?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -523,4 +553,53 @@ model CalendarEvent {
   @@index([contactId])
   @@index([dealId])
   @@map("calendar_events")
+}
+
+// ------------------------------------------------------------------
+// WEBHOOKS DE SAÍDA — o CRM emite eventos (deal mudou de estágio, task
+// venceu, etc.) pra URLs configuradas por tenant. É assim que o n8n (ou
+// qualquer outra ferramenta) vira o "cérebro" da automação, sem a gente
+// ter que construir um motor de regras interno.
+// ------------------------------------------------------------------
+model AutomationWebhook {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  name      String
+  url       String
+  secret    String   // assina o payload de saída (HMAC), receptor confere igual fazemos no webhook inbound da Meta
+  events    String[] @default([]) // vazio = todos os eventos; ou lista tipo ["deal.stage_changed"]
+  isActive  Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries AutomationDelivery[]
+
+  @@index([tenantId])
+  @@map("automation_webhooks")
+}
+
+// Log de cada tentativa de entrega — pra debugar automação sem adivinhar
+// se o n8n recebeu ou não.
+model AutomationDelivery {
+  id        String   @id @default(cuid())
+  webhookId String
+  webhook   AutomationWebhook @relation(fields: [webhookId], references: [id])
+
+  jobId     String   @unique // id do job no BullMQ, usado pra atualizar esse registro a cada retry
+  event     String
+  payload   Json
+
+  status         String @default("pending") // pending | delivered | failed
+  responseStatus Int?
+  error          String?
+  attemptCount   Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([webhookId])
+  @@map("automation_deliveries")
 }

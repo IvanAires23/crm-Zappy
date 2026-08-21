@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
+import { emitAutomationEvent } from "../automation/emit.js";
 
 const createTaskSchema = z.object({
   title: z.string().min(1),
@@ -166,6 +167,15 @@ export async function tasksRoutes(app: FastifyInstance) {
       where: { id },
       data: { status, completedAt: status === "completed" ? new Date() : null },
     });
+
+    if (status === "completed") {
+      await emitAutomationEvent(tenantId, "task.completed", {
+        taskId: id,
+        title: task.title,
+        contactId: task.contactId,
+        dealId: task.dealId,
+      });
+    }
 
     return reply.send(task);
   });

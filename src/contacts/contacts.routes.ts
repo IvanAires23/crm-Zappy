@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
 import { resolveTagId } from "../tags/findOrCreateTag.js";
+import { emitAutomationEvent } from "../automation/emit.js";
 
 // Nota: não existe rota de criação/edição de Contact aqui de propósito —
 // contatos são criados pelo webhook worker a partir de mensagens recebidas.
@@ -102,6 +103,14 @@ export async function contactsRoutes(app: FastifyInstance) {
       create: { contactId, tagId: resolved.id },
       update: {},
       include: { tag: true },
+    });
+
+    await emitAutomationEvent(tenantId, "contact.tag_added", {
+      contactId,
+      contactPhone: contact.phone,
+      contactName: contact.name,
+      tagId: link.tag.id,
+      tagName: link.tag.name,
     });
 
     return reply.status(201).send(link);

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
 import { resolveTagId } from "../tags/findOrCreateTag.js";
+import { emitAutomationEvent } from "../automation/emit.js";
 
 const attachTagSchema = z.object({
   tagId: z.string().min(1).optional(),
@@ -28,6 +29,8 @@ const updateDealSchema = z.object({
   expectedCloseAt: z.coerce.date().nullable().optional(),
   assignedUserId: z.string().min(1).nullable().optional(),
   contactId: z.string().min(1).nullable().optional(),
+  // Substitui o mapa inteiro — o frontend sempre manda o objeto completo já mesclado.
+  customFields: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).optional(),
 });
 
 const moveStageSchema = z.object({
@@ -115,6 +118,14 @@ export async function dealsRoutes(app: FastifyInstance) {
       return created;
     });
 
+    await emitAutomationEvent(tenantId, "deal.created", {
+      dealId: deal.id,
+      title: deal.title,
+      pipelineId: deal.pipelineId,
+      stageId: deal.stageId,
+      contactId: deal.contactId,
+    });
+
     return reply.status(201).send(deal);
   });
 
@@ -164,7 +175,16 @@ export async function dealsRoutes(app: FastifyInstance) {
       include: {
         pipeline: { select: { id: true, name: true } },
         stage: { select: { id: true, name: true } },
-        contact: true,
+        contact: {
+          include: {
+            conversations: {
+              where: { status: { not: "closed" } },
+              orderBy: { lastMessageAt: "desc" },
+              take: 1,
+              select: { id: true },
+            },
+          },
+        },
         assignedUser: { select: { id: true, name: true, email: true } },
         tags: { include: { tag: true } },
         stageHistory: {
@@ -257,6 +277,25 @@ export async function dealsRoutes(app: FastifyInstance) {
       return result;
     });
 
+    if (!isSameStage) {
+      const contact = deal.contactId
+        ? await prisma.contact.findUnique({
+            where: { id: deal.contactId },
+            select: { id: true, name: true, phone: true },
+          })
+        : null;
+
+      await emitAutomationEvent(tenantId, "deal.stage_changed", {
+        dealId: id,
+        title: deal.title,
+        pipelineId: deal.pipelineId,
+        fromStageId: deal.stageId,
+        toStageId: targetStage.id,
+        toStageName: targetStage.name,
+        contact,
+      });
+    }
+
     return reply.send(updated);
   });
 
@@ -286,6 +325,15 @@ export async function dealsRoutes(app: FastifyInstance) {
       },
     });
 
+    if (status !== "open") {
+      await emitAutomationEvent(tenantId, "deal.status_changed", {
+        dealId: id,
+        title: deal.title,
+        status,
+        lostReason: status === "lost" ? lostReason ?? null : null,
+      });
+    }
+
     return reply.send(updated);
   });
 
@@ -309,6 +357,12 @@ export async function dealsRoutes(app: FastifyInstance) {
       create: { dealId, tagId: resolved.id },
       update: {},
       include: { tag: true },
+    });
+
+    await emitAutomationEvent(tenantId, "deal.tag_added", {
+      dealId,
+      tagId: link.tag.id,
+      tagName: link.tag.name,
     });
 
     return reply.status(201).send(link);

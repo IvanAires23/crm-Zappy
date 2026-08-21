@@ -121,6 +121,8 @@ export async function pipelinesRoutes(app: FastifyInstance) {
               include: {
                 contact: { select: { id: true, name: true, phone: true } },
                 assignedUser: { select: { id: true, name: true } },
+                tags: { include: { tag: true } },
+                _count: { select: { tasks: { where: { status: "pending" } } } },
               },
             },
           },

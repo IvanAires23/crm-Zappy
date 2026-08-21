@@ -71,6 +71,25 @@ services:
           cpus: "1"
           memory: 512M
 
+  crm_worker_automation:
+    image: crm-api:latest
+    hostname: "{{.Service.Name}}.{{.Task.Slot}}"
+    command: ["node", "dist/automation/automation.worker.js"]
+    env_file:
+      - .env
+    networks:
+      - talks_network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+
 networks:
   talks_network:
     name: talks_network
