@@ -33,6 +33,7 @@ model Tenant {
   tasks             Task[]
   calendarEvents    CalendarEvent[]
   automationWebhooks AutomationWebhook[]
+  automationRules    AutomationRule[]
   broadcasts        Broadcast[]
   dealCustomFieldDefinitions DealCustomFieldDefinition[]
 
@@ -602,4 +603,55 @@ model AutomationDelivery {
 
   @@index([webhookId])
   @@map("automation_deliveries")
+}
+
+// ------------------------------------------------------------------
+// REGRAS DE AUTOMAÇÃO INTERNA — "quando X acontece, faz Y" dentro do
+// próprio CRM (sem depender de ferramenta externa tipo n8n). Reaproveita
+// o mesmo catálogo de eventos emitido por emitAutomationEvent().
+//
+// Decisão de segurança: as ações executadas por uma regra NÃO emitem
+// novos eventos de automação — evita loop infinito (regra A move pro
+// estágio X, regra B move de volta pro Y, repetindo pra sempre).
+// ------------------------------------------------------------------
+model AutomationRule {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  name              String
+  triggerEvent      String  // ex: "deal.stage_changed"
+  triggerConditions Json?   // ex: {"toStageId": "xyz"} — todos os pares precisam bater
+  actions           Json    // array de ações, executadas em ordem
+  isActive          Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  runs AutomationRuleRun[]
+
+  @@index([tenantId])
+  @@index([tenantId, triggerEvent])
+  @@map("automation_rules")
+}
+
+// Log de execução de cada regra — mesmo raciocínio do AutomationDelivery,
+// mas pra ação interna em vez de webhook de saída.
+model AutomationRuleRun {
+  id     String         @id @default(cuid())
+  ruleId String
+  rule   AutomationRule @relation(fields: [ruleId], references: [id])
+
+  jobId       String @unique
+  event       String
+  triggerData Json
+
+  status String  @default("pending") // pending | success | failed
+  error  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ruleId])
+  @@map("automation_rule_runs")
 }
