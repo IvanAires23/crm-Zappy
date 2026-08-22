@@ -38,6 +38,7 @@ model Tenant {
   dealCustomFieldDefinitions DealCustomFieldDefinition[]
   googleCalendarAccounts     GoogleCalendarAccount[]
   notes                      Note[]
+  quickReplies               QuickReply[]
 
   @@map("tenants")
 }
@@ -238,6 +239,27 @@ model Template {
   @@unique([tenantId, name, language])
   @@index([tenantId])
   @@map("templates")
+}
+
+// ------------------------------------------------------------------
+// RESPOSTAS RÁPIDAS — atalhos de texto livre que o atendente monta na
+// hora (sem aprovação da Meta, ao contrário do Template acima). Digitar
+// "/" na conversa abre a lista pra inserir uma direto na mensagem.
+// ------------------------------------------------------------------
+model QuickReply {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  title   String // rótulo curto, usado pra buscar (ex: "Saudação inicial")
+  content String // texto que entra na mensagem quando escolhida
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, title])
+  @@index([tenantId])
+  @@map("quick_replies")
 }
 
 // ------------------------------------------------------------------
