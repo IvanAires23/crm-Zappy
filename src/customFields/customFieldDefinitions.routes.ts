@@ -3,6 +3,12 @@ import { z } from "zod";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
 
+// Extrai a primeira mensagem de validação legível — sem isso o front recebia
+// o objeto flatten() cru e mostrava "[object Object]" pro usuário.
+function firstZodMessage(error: z.ZodError): string {
+  return error.issues[0]?.message ?? "Dados inválidos";
+}
+
 const SELECT_TYPES = ["select", "multi_select"] as const;
 
 const optionsSchema = z.array(z.string().trim().min(1).max(50)).max(50);
@@ -57,7 +63,7 @@ export async function customFieldDefinitionsRoutes(app: FastifyInstance) {
   app.post("/custom-fields", async (request, reply) => {
     const parsed = createDefinitionSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.flatten() });
+      return reply.status(400).send({ error: firstZodMessage(parsed.error) });
     }
     const tenantId = request.auth.tenantId;
     const { name, type, options } = parsed.data;
@@ -95,7 +101,7 @@ export async function customFieldDefinitionsRoutes(app: FastifyInstance) {
 
     const parsed = updateDefinitionSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.flatten() });
+      return reply.status(400).send({ error: firstZodMessage(parsed.error) });
     }
 
     const existing = await prisma.dealCustomFieldDefinition.findFirst({ where: { id, tenantId } });
