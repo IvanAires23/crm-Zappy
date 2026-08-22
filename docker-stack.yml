@@ -4,7 +4,10 @@ services:
   crm_api:
     image: crm-api:latest
     hostname: "{{.Service.Name}}.{{.Task.Slot}}"
-    command: ["node", "dist/server.js"]
+    # Só esse serviço roda o entrypoint (prisma db push + server) — os
+    # workers abaixo sobem direto com "node ...", sem rodar db push de novo
+    # (evita 4 pushes de schema concorrentes no mesmo banco a cada deploy).
+    command: ["./docker-entrypoint.sh"]
     env_file:
       - .env
     networks:
