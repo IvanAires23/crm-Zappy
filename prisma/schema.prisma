@@ -37,6 +37,7 @@ model Tenant {
   broadcasts        Broadcast[]
   dealCustomFieldDefinitions DealCustomFieldDefinition[]
   googleCalendarAccounts     GoogleCalendarAccount[]
+  notes                      Note[]
 
   @@map("tenants")
 }
@@ -95,6 +96,7 @@ model User {
   assignedTasks         Task[]         @relation("AssignedTask")
   assignedCalendarEvents CalendarEvent[] @relation("AssignedCalendarEvent")
   googleCalendarAccount  GoogleCalendarAccount?
+  notes                  Note[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -120,6 +122,7 @@ model Contact {
   tasks         Task[]
   calendarEvents CalendarEvent[]
   broadcastRecipients BroadcastRecipient[]
+  notes         Note[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -146,10 +149,41 @@ model Conversation {
 
   messages       Message[]
   tasks          Task[]
+  notes          Note[]
 
   @@index([tenantId])
   @@index([tenantId, status])
   @@map("conversations")
+}
+
+// ------------------------------------------------------------------
+// NOTAS INTERNAS — anotações do atendente sobre o contato, nunca
+// enviadas pro cliente. Pertencem ao contato (ficam visíveis em
+// qualquer conversa com ele), mas guardam de qual conversa nasceram
+// pra dar contexto de quando foram escritas.
+// ------------------------------------------------------------------
+model Note {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id])
+
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+
+  authorUserId String?
+  authorUser   User?   @relation(fields: [authorUserId], references: [id])
+
+  content String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([contactId])
+  @@map("notes")
 }
 
 // ------------------------------------------------------------------
