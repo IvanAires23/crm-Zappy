@@ -2,6 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
+import { deleteGoogleEventForCalendarEvent, syncCalendarEventToGoogle } from "../integrations/googleCalendar/googleCalendarSync.js";
+
+// Eventos gerados a partir de uma Task (ver taskService) espelham o
+// dueAt/status da task — editar por aqui direto deixaria os dois
+// dessincronizados, então essas mutações são bloqueadas nesse caso.
+const TASK_LINKED_ERROR = { error: "Esse evento pertence a uma tarefa — edite/exclua pela tela de tarefas" };
 
 const createEventSchema = z
   .object({
@@ -78,6 +84,8 @@ export async function calendarRoutes(app: FastifyInstance) {
       data: { tenantId, ...parsed.data },
     });
 
+    void syncCalendarEventToGoogle(event.id);
+
     return reply.status(201).send(event);
   });
 
@@ -143,6 +151,7 @@ export async function calendarRoutes(app: FastifyInstance) {
 
     const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId } });
     if (!existing) return reply.status(404).send({ error: "Evento não encontrado" });
+    if (existing.taskId) return reply.status(400).send(TASK_LINKED_ERROR);
 
     const nextStartAt = parsed.data.startAt ?? existing.startAt;
     const nextEndAt = parsed.data.endAt ?? existing.endAt;
@@ -160,6 +169,7 @@ export async function calendarRoutes(app: FastifyInstance) {
     }
 
     const event = await prisma.calendarEvent.update({ where: { id }, data: parsed.data });
+    void syncCalendarEventToGoogle(event.id);
     return reply.send(event);
   });
 
@@ -174,12 +184,14 @@ export async function calendarRoutes(app: FastifyInstance) {
 
     const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId } });
     if (!existing) return reply.status(404).send({ error: "Evento não encontrado" });
+    if (existing.taskId) return reply.status(400).send(TASK_LINKED_ERROR);
 
     const event = await prisma.calendarEvent.update({
       where: { id },
       data: { status: parsed.data.status },
     });
 
+    void syncCalendarEventToGoogle(event.id);
     return reply.send(event);
   });
 
@@ -189,6 +201,9 @@ export async function calendarRoutes(app: FastifyInstance) {
 
     const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId } });
     if (!existing) return reply.status(404).send({ error: "Evento não encontrado" });
+    if (existing.taskId) return reply.status(400).send(TASK_LINKED_ERROR);
+
+    await deleteGoogleEventForCalendarEvent(existing);
 
     await prisma.calendarEvent.delete({ where: { id } });
     return reply.status(204).send();

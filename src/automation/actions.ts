@@ -1,4 +1,5 @@
 import { prisma } from "../db/prisma.js";
+import { createTask } from "../tasks/taskService.js";
 
 export type RuleAction =
   | { type: "update_deal_status"; status: "open" | "won" | "lost"; lostReason?: string }
@@ -118,17 +119,14 @@ export async function executeAction(
     }
 
     case "create_task": {
-      await prisma.task.create({
-        data: {
-          tenantId,
-          title: action.title,
-          description: action.description,
-          dueAt: new Date(Date.now() + (action.dueInMinutes ?? 24 * 60) * 60000),
-          priority: action.priority ?? "medium",
-          assignedUserId: action.assignedUserId,
-          contactId: (eventData.contactId as string | undefined) ?? null,
-          dealId: (eventData.dealId as string | undefined) ?? null,
-        },
+      await createTask(tenantId, {
+        title: action.title,
+        description: action.description,
+        dueAt: new Date(Date.now() + (action.dueInMinutes ?? 24 * 60) * 60000),
+        priority: action.priority ?? "medium",
+        assignedUserId: action.assignedUserId,
+        contactId: (eventData.contactId as string | undefined) ?? null,
+        dealId: (eventData.dealId as string | undefined) ?? null,
       });
       return;
     }

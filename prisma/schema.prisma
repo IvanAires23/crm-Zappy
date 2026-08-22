@@ -36,6 +36,7 @@ model Tenant {
   automationRules    AutomationRule[]
   broadcasts        Broadcast[]
   dealCustomFieldDefinitions DealCustomFieldDefinition[]
+  googleCalendarAccounts     GoogleCalendarAccount[]
 
   @@map("tenants")
 }
@@ -93,6 +94,7 @@ model User {
   assignedDeals         Deal[]         @relation("AssignedDeal")
   assignedTasks         Task[]         @relation("AssignedTask")
   assignedCalendarEvents CalendarEvent[] @relation("AssignedCalendarEvent")
+  googleCalendarAccount  GoogleCalendarAccount?
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -143,6 +145,7 @@ model Conversation {
   createdAt      DateTime @default(now())
 
   messages       Message[]
+  tasks          Task[]
 
   @@index([tenantId])
   @@index([tenantId, status])
@@ -490,6 +493,11 @@ model Task {
   dealId      String?
   deal        Deal?    @relation(fields: [dealId], references: [id])
 
+  // De qual conversa essa task foi criada (ex: "agendar follow-up" durante
+  // um atendimento) — opcional, uma task pode nascer de outros lugares.
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+
   assignedUserId String?
   assignedUser   User?  @relation("AssignedTask", fields: [assignedUserId], references: [id])
 
@@ -502,6 +510,11 @@ model Task {
   // task, pra não disparar de novo a cada varredura.
   overdueNotifiedAt DateTime?
 
+  // Toda task tem um compromisso correspondente no calendário (criado e
+  // mantido automaticamente pelo taskService) — é o que faz a task
+  // aparecer na visão de calendário e, dali, sincronizar com o Google.
+  calendarEvent CalendarEvent?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -509,6 +522,7 @@ model Task {
   @@index([tenantId, status, dueAt])
   @@index([contactId])
   @@index([dealId])
+  @@index([conversationId])
   @@map("tasks")
 }
 
@@ -547,6 +561,18 @@ model CalendarEvent {
   reminderMinutesBefore Int?
   reminderSentAt        DateTime?
 
+  // Presente quando esse evento foi gerado a partir de uma Task (ver
+  // taskService) — editar/concluir/excluir esse evento nesse caso deve
+  // passar pelos endpoints de /tasks, não direto por aqui.
+  taskId      String?  @unique
+  task        Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // Espelho no Google Calendar do usuário responsável (ver
+  // GoogleCalendarAccount) — preenchido pelo googleCalendarSync depois
+  // que o evento é criado/atualizado por lá.
+  googleEventId  String?
+  googleSyncedAt DateTime?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -555,6 +581,34 @@ model CalendarEvent {
   @@index([contactId])
   @@index([dealId])
   @@map("calendar_events")
+}
+
+// ------------------------------------------------------------------
+// GOOGLE CALENDAR — conexão pessoal de cada usuário (agente) com sua
+// conta Google, via OAuth2. Quando conectado, os CalendarEvent onde
+// ele é o assignedUser passam a sincronizar com o Google Calendar dele.
+// ------------------------------------------------------------------
+model GoogleCalendarAccount {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  googleEmail String?
+  calendarId  String  @default("primary")
+
+  accessTokenEncrypted  String
+  refreshTokenEncrypted String
+  scope                 String?
+  expiresAt             DateTime
+
+  connectedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId])
+  @@map("google_calendar_accounts")
 }
 
 // ------------------------------------------------------------------
