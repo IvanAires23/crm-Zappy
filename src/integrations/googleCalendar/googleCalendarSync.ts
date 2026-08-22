@@ -104,3 +104,115 @@ export async function deleteGoogleEventForCalendarEvent(event: CalendarEvent): P
     logger.error({ err, calendarEventId: event.id }, "Falha ao excluir evento no Google Calendar");
   }
 }
+
+// Só busca eventos futuros num horizonte razoável — não faz sentido puxar
+// anos de histórico pro CRM, e evita um primeiro sync gigante.
+const PULL_HORIZON_MS = 180 * 24 * 60 * 60 * 1000;
+
+function isGoogleApiError(err: unknown, code: number): boolean {
+  return typeof err === "object" && err !== null && "code" in err && (err as { code?: unknown }).code === code;
+}
+
+// Espelha um evento vindo do Google numa linha local de CalendarEvent,
+// casando pelo par (assignedUserId, googleEventId). Eventos que já
+// pertencem a uma Task nunca têm o conteúdo sobrescrito por aqui — o CRM
+// é quem manda neles; só atualizamos o carimbo de sincronização.
+async function upsertLocalEventFromGoogle(account: GoogleCalendarAccount, event: calendar_v3.Schema$Event) {
+  if (!event.id) return;
+
+  const existing = await prisma.calendarEvent.findUnique({
+    where: { assignedUserId_googleEventId: { assignedUserId: account.userId, googleEventId: event.id } },
+  });
+
+  if (existing?.taskId) {
+    await prisma.calendarEvent.update({ where: { id: existing.id }, data: { googleSyncedAt: new Date() } });
+    return;
+  }
+
+  if (event.status === "cancelled") {
+    if (existing) await prisma.calendarEvent.delete({ where: { id: existing.id } });
+    return;
+  }
+
+  const startAt = event.start?.dateTime ?? event.start?.date;
+  const endAt = event.end?.dateTime ?? event.end?.date;
+  if (!startAt || !endAt) return; // evento recorrente "mestre" sem data própria, ou corrompido — ignora
+
+  const fields = {
+    tenantId: account.tenantId,
+    title: event.summary ?? "(sem título)",
+    description: event.description ?? null,
+    startAt: new Date(startAt),
+    endAt: new Date(endAt),
+    allDay: Boolean(event.start?.date && !event.start?.dateTime),
+    location: event.location ?? null,
+    assignedUserId: account.userId,
+    status: "scheduled" as const, // Google não distingue "concluído" — só cancelado (tratado acima)
+    googleEventId: event.id,
+    googleSyncedAt: new Date(),
+  };
+
+  if (existing) {
+    await prisma.calendarEvent.update({ where: { id: existing.id }, data: fields });
+  } else {
+    await prisma.calendarEvent.create({ data: fields });
+  }
+}
+
+// Importa (e mantém atualizados) os eventos do Google Calendar da conta
+// conectada pra dentro do CRM — a outra metade da sincronização de mão
+// dupla (a primeira metade é o syncCalendarEventToGoogle acima). Usa o
+// syncToken da Google Calendar API pra só buscar o que mudou depois da
+// primeira vez. Best-effort, como o resto desse módulo.
+export async function pullGoogleEventsForAccount(account: GoogleCalendarAccount): Promise<void> {
+  try {
+    const auth = authorizedClientFor(account);
+    const calendar = google.calendar({ version: "v3", auth });
+
+    let pageToken: string | undefined;
+    let nextSyncToken: string | undefined;
+
+    do {
+      const params: calendar_v3.Params$Resource$Events$List = {
+        calendarId: account.calendarId,
+        singleEvents: true,
+        maxResults: 250,
+        pageToken,
+      };
+      if (account.googleSyncToken) {
+        params.syncToken = account.googleSyncToken;
+      } else {
+        params.timeMin = new Date().toISOString();
+        params.timeMax = new Date(Date.now() + PULL_HORIZON_MS).toISOString();
+      }
+
+      const res = await calendar.events.list(params);
+
+      for (const event of res.data.items ?? []) {
+        await upsertLocalEventFromGoogle(account, event);
+      }
+
+      pageToken = res.data.nextPageToken ?? undefined;
+      if (res.data.nextSyncToken) nextSyncToken = res.data.nextSyncToken;
+    } while (pageToken);
+
+    await prisma.googleCalendarAccount.update({
+      where: { id: account.id },
+      data: { googleSyncToken: nextSyncToken ?? account.googleSyncToken, lastGoogleSyncAt: new Date() },
+    });
+  } catch (err) {
+    if (isGoogleApiError(err, 410)) {
+      // syncToken expirado/inválido — limpa pra próxima rodada refazer o full sync
+      await prisma.googleCalendarAccount.update({ where: { id: account.id }, data: { googleSyncToken: null } });
+      return;
+    }
+    logger.error({ err, accountId: account.id }, "Falha ao importar eventos do Google Calendar");
+  }
+}
+
+export async function pullAllConnectedGoogleCalendars(): Promise<void> {
+  const accounts = await prisma.googleCalendarAccount.findMany();
+  for (const account of accounts) {
+    await pullGoogleEventsForAccount(account);
+  }
+}

@@ -6,6 +6,7 @@ import { authenticate } from "../../auth/auth.plugin.js";
 import { env } from "../../config/env.js";
 import { encryptToken } from "../../config/crypto.js";
 import { createGoogleOAuthClient, isGoogleCalendarConfigured, GOOGLE_CALENDAR_SCOPES } from "./googleOAuthClient.js";
+import { pullGoogleEventsForAccount } from "./googleCalendarSync.js";
 
 interface OAuthState {
   sub: string;
@@ -44,7 +45,10 @@ export async function googleCalendarRoutes(app: FastifyInstance) {
       const oauth2 = google.oauth2({ version: "v2", auth: client });
       const userInfo = await oauth2.userinfo.get().catch(() => null);
 
-      await prisma.googleCalendarAccount.upsert({
+      // Reconectar depois de já ter sincronizado antes começa um full sync
+      // de novo (syncToken zerado) — mais seguro que arriscar um syncToken
+      // de uma sessão de tokens anterior que não bate mais.
+      const account = await prisma.googleCalendarAccount.upsert({
         where: { userId: payload.sub },
         create: {
           tenantId: payload.tenantId,
@@ -61,8 +65,13 @@ export async function googleCalendarRoutes(app: FastifyInstance) {
           refreshTokenEncrypted: encryptToken(tokens.refresh_token),
           scope: tokens.scope ?? null,
           expiresAt: new Date(tokens.expiry_date),
+          googleSyncToken: null,
         },
       });
+
+      // Dispara a primeira importação em segundo plano — não trava o
+      // redirect esperando meses de eventos serem baixados.
+      void pullGoogleEventsForAccount(account);
 
       return reply.redirect(`${env.FRONTEND_URL}/configuracoes/calendario?google=connected`);
     } catch (err) {
@@ -91,7 +100,20 @@ export async function googleCalendarRoutes(app: FastifyInstance) {
         email: account.googleEmail,
         calendarId: account.calendarId,
         connectedAt: account.connectedAt,
+        lastSyncedAt: account.lastGoogleSyncAt,
       });
+    });
+
+    // Sincronização manual — o pull automático roda a cada 5 minutos pelo
+    // worker de automação, mas o usuário pode querer ver o resultado na hora.
+    protectedApp.post("/integrations/google-calendar/sync", async (request, reply) => {
+      const account = await prisma.googleCalendarAccount.findUnique({ where: { userId: request.auth.sub } });
+      if (!account) return reply.status(404).send({ error: "Nenhuma conta Google conectada" });
+
+      await pullGoogleEventsForAccount(account);
+      const updated = await prisma.googleCalendarAccount.findUnique({ where: { userId: request.auth.sub } });
+
+      return reply.send({ synced: true, lastSyncedAt: updated?.lastGoogleSyncAt ?? null });
     });
 
     protectedApp.get("/integrations/google-calendar/connect", async (request, reply) => {
@@ -117,6 +139,14 @@ export async function googleCalendarRoutes(app: FastifyInstance) {
     protectedApp.delete("/integrations/google-calendar", async (request, reply) => {
       const existing = await prisma.googleCalendarAccount.findUnique({ where: { userId: request.auth.sub } });
       if (!existing) return reply.status(404).send({ error: "Nenhuma conta Google conectada" });
+
+      // Desconectar só desfaz o vínculo — os eventos continuam existindo no
+      // CRM (só param de ecoar pro Google). Eventos de uma task continuam
+      // isolados dessa limpeza, já que quem manda neles é sempre o CRM.
+      await prisma.calendarEvent.updateMany({
+        where: { assignedUserId: request.auth.sub, taskId: null },
+        data: { googleEventId: null, googleSyncedAt: null },
+      });
 
       await prisma.googleCalendarAccount.delete({ where: { userId: request.auth.sub } });
       return reply.status(204).send();
