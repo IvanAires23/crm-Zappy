@@ -36,6 +36,9 @@ model Tenant {
   automationRules    AutomationRule[]
   broadcasts        Broadcast[]
   dealCustomFieldDefinitions DealCustomFieldDefinition[]
+  googleCalendarAccounts     GoogleCalendarAccount[]
+  notes                      Note[]
+  quickReplies               QuickReply[]
 
   @@map("tenants")
 }
@@ -93,6 +96,8 @@ model User {
   assignedDeals         Deal[]         @relation("AssignedDeal")
   assignedTasks         Task[]         @relation("AssignedTask")
   assignedCalendarEvents CalendarEvent[] @relation("AssignedCalendarEvent")
+  googleCalendarAccount  GoogleCalendarAccount?
+  notes                  Note[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -118,6 +123,7 @@ model Contact {
   tasks         Task[]
   calendarEvents CalendarEvent[]
   broadcastRecipients BroadcastRecipient[]
+  notes         Note[]
 
   @@unique([tenantId, phone])
   @@index([tenantId])
@@ -143,10 +149,42 @@ model Conversation {
   createdAt      DateTime @default(now())
 
   messages       Message[]
+  tasks          Task[]
+  notes          Note[]
 
   @@index([tenantId])
   @@index([tenantId, status])
   @@map("conversations")
+}
+
+// ------------------------------------------------------------------
+// NOTAS INTERNAS — anotações do atendente sobre o contato, nunca
+// enviadas pro cliente. Pertencem ao contato (ficam visíveis em
+// qualquer conversa com ele), mas guardam de qual conversa nasceram
+// pra dar contexto de quando foram escritas.
+// ------------------------------------------------------------------
+model Note {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id])
+
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+
+  authorUserId String?
+  authorUser   User?   @relation(fields: [authorUserId], references: [id])
+
+  content String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([contactId])
+  @@map("notes")
 }
 
 // ------------------------------------------------------------------
@@ -201,6 +239,27 @@ model Template {
   @@unique([tenantId, name, language])
   @@index([tenantId])
   @@map("templates")
+}
+
+// ------------------------------------------------------------------
+// RESPOSTAS RÁPIDAS — atalhos de texto livre que o atendente monta na
+// hora (sem aprovação da Meta, ao contrário do Template acima). Digitar
+// "/" na conversa abre a lista pra inserir uma direto na mensagem.
+// ------------------------------------------------------------------
+model QuickReply {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  title   String // rótulo curto, usado pra buscar (ex: "Saudação inicial")
+  content String // texto que entra na mensagem quando escolhida
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, title])
+  @@index([tenantId])
+  @@map("quick_replies")
 }
 
 // ------------------------------------------------------------------
@@ -386,7 +445,8 @@ model DealCustomFieldDefinition {
   tenant    Tenant   @relation(fields: [tenantId], references: [id])
 
   name      String
-  type      String   @default("text") // text | number | date
+  type      String   @default("text") // text | number | date | select | multi_select
+  options   Json     @default("[]") // lista de strings — só usado quando type é select ou multi_select
   order     Int      @default(0)
 
   createdAt DateTime @default(now())
@@ -489,6 +549,11 @@ model Task {
   dealId      String?
   deal        Deal?    @relation(fields: [dealId], references: [id])
 
+  // De qual conversa essa task foi criada (ex: "agendar follow-up" durante
+  // um atendimento) — opcional, uma task pode nascer de outros lugares.
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+
   assignedUserId String?
   assignedUser   User?  @relation("AssignedTask", fields: [assignedUserId], references: [id])
 
@@ -501,6 +566,11 @@ model Task {
   // task, pra não disparar de novo a cada varredura.
   overdueNotifiedAt DateTime?
 
+  // Toda task tem um compromisso correspondente no calendário (criado e
+  // mantido automaticamente pelo taskService) — é o que faz a task
+  // aparecer na visão de calendário e, dali, sincronizar com o Google.
+  calendarEvent CalendarEvent?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -508,6 +578,7 @@ model Task {
   @@index([tenantId, status, dueAt])
   @@index([contactId])
   @@index([dealId])
+  @@index([conversationId])
   @@map("tasks")
 }
 
@@ -546,6 +617,19 @@ model CalendarEvent {
   reminderMinutesBefore Int?
   reminderSentAt        DateTime?
 
+  // Presente quando esse evento foi gerado a partir de uma Task (ver
+  // taskService) — editar/concluir/excluir esse evento nesse caso deve
+  // passar pelos endpoints de /tasks, não direto por aqui.
+  taskId      String?  @unique
+  task        Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // Espelho no Google Calendar do usuário responsável (ver
+  // GoogleCalendarAccount) — preenchido pelo googleCalendarSync depois
+  // que o evento é criado/atualizado por lá, ou quando o evento foi
+  // importado de lá pra cá (sincronização é via de mão dupla).
+  googleEventId  String?
+  googleSyncedAt DateTime?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -553,7 +637,44 @@ model CalendarEvent {
   @@index([tenantId, startAt])
   @@index([contactId])
   @@index([dealId])
+  // Chave usada pelo pull do Google Calendar pra achar/atualizar o espelho
+  // local de um evento (em vez de duplicar a cada sincronização).
+  @@unique([assignedUserId, googleEventId])
   @@map("calendar_events")
+}
+
+// ------------------------------------------------------------------
+// GOOGLE CALENDAR — conexão pessoal de cada usuário (agente) com sua
+// conta Google, via OAuth2. Quando conectado, os CalendarEvent onde
+// ele é o assignedUser passam a sincronizar com o Google Calendar dele.
+// ------------------------------------------------------------------
+model GoogleCalendarAccount {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  googleEmail String?
+  calendarId  String  @default("primary")
+
+  accessTokenEncrypted  String
+  refreshTokenEncrypted String
+  scope                 String?
+  expiresAt             DateTime
+
+  // Cursor de sincronização incremental da Google Calendar API — quando
+  // presente, o próximo pull só busca o que mudou desde a última vez
+  // (em vez de refazer a lista inteira). Nulo força um full sync.
+  googleSyncToken String?
+  lastGoogleSyncAt DateTime?
+
+  connectedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId])
+  @@map("google_calendar_accounts")
 }
 
 // ------------------------------------------------------------------

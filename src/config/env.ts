@@ -15,6 +15,13 @@ const envSchema = z.object({
   META_WEBHOOK_VERIFY_TOKEN: z.string().min(1),
 
   TOKEN_ENCRYPTION_KEY: z.string().min(1),
+
+  // --- Google Calendar (OAuth2) --- opcionais: sem elas, a integração
+  // fica desligada (endpoints respondem com erro claro em vez de quebrar o boot).
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_REDIRECT_URI: z.string().optional(),
+  FRONTEND_URL: z.string().default("http://localhost:5173"),
 });
 
 const parsed = envSchema.safeParse(process.env);

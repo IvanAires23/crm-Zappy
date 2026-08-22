@@ -5,6 +5,7 @@ import { connection, schedulerQueue } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
 import { emitAutomationEvent } from "./emit.js";
 import { executeAction, type RuleAction } from "./actions.js";
+import { pullAllConnectedGoogleCalendars } from "../integrations/googleCalendar/googleCalendarSync.js";
 
 const logger = pino({ transport: { target: "pino-pretty" } });
 
@@ -165,6 +166,7 @@ new Worker(
   async () => {
     await checkOverdueTasks();
     await checkCalendarReminders();
+    await pullAllConnectedGoogleCalendars();
   },
   { connection, concurrency: 1 }
 );

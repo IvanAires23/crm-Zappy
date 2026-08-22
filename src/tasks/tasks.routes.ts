@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
 import { emitAutomationEvent } from "../automation/emit.js";
+import { createTask, deleteTask, setTaskStatus, updateTask } from "./taskService.js";
 
 const createTaskSchema = z.object({
   title: z.string().min(1),
@@ -10,6 +11,9 @@ const createTaskSchema = z.object({
   type: z.string().optional(),
   contactId: z.string().min(1).optional(),
   dealId: z.string().min(1).optional(),
+  // De qual conversa a task foi criada (ex: botão "criar tarefa" no chat).
+  // Se contactId não vier junto, é derivado do contato dessa conversa.
+  conversationId: z.string().min(1).optional(),
   assignedUserId: z.string().min(1).optional(),
   dueAt: z.coerce.date(),
   priority: z.enum(["low", "medium", "high"]).optional(),
@@ -21,6 +25,7 @@ const updateTaskSchema = z.object({
   type: z.string().nullable().optional(),
   contactId: z.string().min(1).nullable().optional(),
   dealId: z.string().min(1).nullable().optional(),
+  conversationId: z.string().min(1).nullable().optional(),
   assignedUserId: z.string().min(1).nullable().optional(),
   dueAt: z.coerce.date().optional(),
   priority: z.enum(["low", "medium", "high"]).optional(),
@@ -33,6 +38,7 @@ const updateStatusSchema = z.object({
 const listQuerySchema = z.object({
   contactId: z.string().min(1).optional(),
   dealId: z.string().min(1).optional(),
+  conversationId: z.string().min(1).optional(),
   assignedUserId: z.string().min(1).optional(),
   status: z.enum(["pending", "completed", "canceled"]).optional(),
   priority: z.enum(["low", "medium", "high"]).optional(),
@@ -51,8 +57,13 @@ export async function tasksRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const tenantId = request.auth.tenantId;
-    const { contactId, dealId } = parsed.data;
+    let { contactId, dealId, conversationId } = parsed.data;
 
+    if (conversationId) {
+      const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, tenantId } });
+      if (!conversation) return reply.status(400).send({ error: "Conversa não encontrada" });
+      contactId = contactId ?? conversation.contactId;
+    }
     if (contactId) {
       const contact = await prisma.contact.findFirst({ where: { id: contactId, tenantId } });
       if (!contact) return reply.status(400).send({ error: "Contato não encontrado" });
@@ -62,9 +73,7 @@ export async function tasksRoutes(app: FastifyInstance) {
       if (!deal) return reply.status(400).send({ error: "Deal não encontrado" });
     }
 
-    const task = await prisma.task.create({
-      data: { tenantId, ...parsed.data },
-    });
+    const task = await createTask(tenantId, { ...parsed.data, contactId, conversationId });
 
     return reply.status(201).send(task);
   });
@@ -75,12 +84,14 @@ export async function tasksRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const tenantId = request.auth.tenantId;
-    const { contactId, dealId, assignedUserId, status, priority, overdue, search, page, pageSize } = parsed.data;
+    const { contactId, dealId, conversationId, assignedUserId, status, priority, overdue, search, page, pageSize } =
+      parsed.data;
 
     const where = {
       tenantId,
       ...(contactId ? { contactId } : {}),
       ...(dealId ? { dealId } : {}),
+      ...(conversationId ? { conversationId } : {}),
       ...(assignedUserId ? { assignedUserId } : {}),
       ...(status ? { status } : {}),
       ...(priority ? { priority } : {}),
@@ -135,6 +146,10 @@ export async function tasksRoutes(app: FastifyInstance) {
     const existing = await prisma.task.findFirst({ where: { id, tenantId } });
     if (!existing) return reply.status(404).send({ error: "Task não encontrada" });
 
+    if (parsed.data.conversationId) {
+      const conversation = await prisma.conversation.findFirst({ where: { id: parsed.data.conversationId, tenantId } });
+      if (!conversation) return reply.status(400).send({ error: "Conversa não encontrada" });
+    }
     if (parsed.data.contactId) {
       const contact = await prisma.contact.findFirst({ where: { id: parsed.data.contactId, tenantId } });
       if (!contact) return reply.status(400).send({ error: "Contato não encontrado" });
@@ -144,7 +159,7 @@ export async function tasksRoutes(app: FastifyInstance) {
       if (!deal) return reply.status(400).send({ error: "Deal não encontrado" });
     }
 
-    const task = await prisma.task.update({ where: { id }, data: parsed.data });
+    const task = await updateTask(id, parsed.data);
     return reply.send(task);
   });
 
@@ -163,10 +178,7 @@ export async function tasksRoutes(app: FastifyInstance) {
 
     const { status } = parsed.data;
 
-    const task = await prisma.task.update({
-      where: { id },
-      data: { status, completedAt: status === "completed" ? new Date() : null },
-    });
+    const task = await setTaskStatus(id, status);
 
     if (status === "completed") {
       await emitAutomationEvent(tenantId, "task.completed", {
@@ -187,7 +199,7 @@ export async function tasksRoutes(app: FastifyInstance) {
     const existing = await prisma.task.findFirst({ where: { id, tenantId } });
     if (!existing) return reply.status(404).send({ error: "Task não encontrada" });
 
-    await prisma.task.delete({ where: { id } });
+    await deleteTask(id);
     return reply.status(204).send();
   });
 }

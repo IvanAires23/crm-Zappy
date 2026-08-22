@@ -18,6 +18,9 @@ import { templatesRoutes } from "./templates/templates.routes.js";
 import { broadcastsRoutes } from "./broadcasts/broadcasts.routes.js";
 import { customFieldDefinitionsRoutes } from "./customFields/customFieldDefinitions.routes.js";
 import { dashboardRoutes } from "./dashboard/dashboard.routes.js";
+import { googleCalendarRoutes } from "./integrations/googleCalendar/googleCalendar.routes.js";
+import { notesRoutes } from "./notes/notes.routes.js";
+import { quickRepliesRoutes } from "./quickReplies/quickReplies.routes.js";
 
 const app = Fastify({
   logger: {
@@ -52,6 +55,9 @@ async function main() {
   await app.register(broadcastsRoutes);
   await app.register(customFieldDefinitionsRoutes);
   await app.register(dashboardRoutes);
+  await app.register(googleCalendarRoutes);
+  await app.register(notesRoutes);
+  await app.register(quickRepliesRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 
