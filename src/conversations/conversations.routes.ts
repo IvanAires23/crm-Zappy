@@ -7,16 +7,45 @@ import { outboundQueue } from "../queue/queue.js";
 const paramsSchema = z.object({ id: z.string().min(1) });
 const sendMessageSchema = z.object({ text: z.string().min(1) });
 
+// Mesma lógica que o frontend usa pra renderizar uma mensagem dentro da
+// conversa, só que resumida numa linha — é o que aparece embaixo do nome
+// do contato na lista, tipo a prévia do WhatsApp Web.
+function extractMessagePreview(message: { direction: string; type: string; content: unknown } | undefined): string | null {
+  if (!message) return null;
+  const content = message.content as Record<string, unknown> | null;
+  if (!content) return null;
+
+  if (message.direction === "outbound") {
+    return typeof content.text === "string" ? content.text : `[${message.type}]`;
+  }
+
+  if (message.type === "text") {
+    const text = content.text as { body?: string } | undefined;
+    return text?.body ?? null;
+  }
+  return `[${message.type}]`;
+}
+
 export async function conversationsRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
 
   app.get("/conversations", async (request, reply) => {
     const conversations = await prisma.conversation.findMany({
       where: { tenantId: request.auth.tenantId },
-      include: { contact: true },
+      include: {
+        contact: true,
+        messages: { orderBy: { createdAt: "desc" }, take: 1 },
+      },
       orderBy: { lastMessageAt: "desc" },
     });
-    return reply.send(conversations);
+
+    const result = conversations.map(({ messages, ...conversation }) => ({
+      ...conversation,
+      lastMessagePreview: extractMessagePreview(messages[0]),
+      lastMessageDirection: messages[0]?.direction ?? null,
+    }));
+
+    return reply.send(result);
   });
 
   app.get("/conversations/:id/messages", async (request, reply) => {
