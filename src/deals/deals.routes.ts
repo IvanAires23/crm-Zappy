@@ -30,7 +30,9 @@ const updateDealSchema = z.object({
   assignedUserId: z.string().min(1).nullable().optional(),
   contactId: z.string().min(1).nullable().optional(),
   // Substitui o mapa inteiro — o frontend sempre manda o objeto completo já mesclado.
-  customFields: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).optional(),
+  customFields: z
+    .record(z.string(), z.union([z.string(), z.number(), z.array(z.string()), z.null()]))
+    .optional(),
 });
 
 const moveStageSchema = z.object({
@@ -217,6 +219,30 @@ export async function dealsRoutes(app: FastifyInstance) {
     if (parsed.data.contactId) {
       const contact = await prisma.contact.findFirst({ where: { id: parsed.data.contactId, tenantId } });
       if (!contact) return reply.status(400).send({ error: "Contato não encontrado" });
+    }
+
+    if (parsed.data.customFields) {
+      const definitions = await prisma.dealCustomFieldDefinition.findMany({ where: { tenantId } });
+      const definitionById = new Map(definitions.map((def) => [def.id, def]));
+
+      for (const [fieldId, value] of Object.entries(parsed.data.customFields)) {
+        const definition = definitionById.get(fieldId);
+        if (!definition || value === null) continue;
+
+        if (definition.type === "select") {
+          const options = definition.options as string[];
+          if (typeof value !== "string" || !options.includes(value)) {
+            return reply.status(400).send({ error: `Valor inválido para o campo "${definition.name}"` });
+          }
+        }
+
+        if (definition.type === "multi_select") {
+          const options = definition.options as string[];
+          if (!Array.isArray(value) || value.some((v) => !options.includes(v))) {
+            return reply.status(400).send({ error: `Valor inválido para o campo "${definition.name}"` });
+          }
+        }
+      }
     }
 
     const deal = await prisma.deal.update({ where: { id }, data: parsed.data });

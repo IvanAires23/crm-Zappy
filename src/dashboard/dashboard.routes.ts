@@ -188,8 +188,13 @@ export async function dashboardRoutes(app: FastifyInstance) {
         };
       }
 
+      // text, select e multi_select viram uma contagem por valor — multi_select
+      // "espalha" cada opção selecionada como uma contagem própria.
       const valueCounts = new Map<string, number>();
-      for (const v of rawValues) increment(valueCounts, String(v));
+      for (const v of rawValues) {
+        const items = Array.isArray(v) ? v : [v];
+        for (const item of items) increment(valueCounts, String(item));
+      }
       const sorted = Array.from(valueCounts.entries())
         .map(([value, count]) => ({ value, count }))
         .sort((a, b) => b.count - a.count);

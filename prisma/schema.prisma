@@ -386,7 +386,8 @@ model DealCustomFieldDefinition {
   tenant    Tenant   @relation(fields: [tenantId], references: [id])
 
   name      String
-  type      String   @default("text") // text | number | date
+  type      String   @default("text") // text | number | date | select | multi_select
+  options   Json     @default("[]") // lista de strings — só usado quando type é select ou multi_select
   order     Int      @default(0)
 
   createdAt DateTime @default(now())
