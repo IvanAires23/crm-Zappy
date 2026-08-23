@@ -54,6 +54,11 @@ Uma pasta por domínio, cada uma com `*.routes.ts` registrado em
   Não existe query "global" nas rotas de negócio.
 - **Comentários em português, curtos, só quando explicam o "porquê"** (uma
   decisão não óbvia, uma pegadinha da API da Meta, etc.) — nunca o "o quê".
+- **Schema muda só por migration.** Editou `prisma/schema.prisma`? Rode
+  `npx prisma migrate dev --name <descrição>` — isso gera o SQL em
+  `prisma/migrations/` e aplica no seu banco local. **Nunca use `prisma db
+  push`** neste projeto: ele foi abandonado de propósito (ver "Deploy"), e
+  o CI falha o PR se o schema mudar sem uma migration correspondente.
 - **Sem testes automatizados ainda** — validação é `tsc --noEmit` +
   teste manual (curl/Playwright). Ver roadmap.
 
@@ -63,7 +68,7 @@ Uma pasta por domínio, cada uma com `*.routes.ts` registrado em
 cp .env.example .env        # preencha META_*, TOKEN_ENCRYPTION_KEY, etc.
 docker compose up -d postgres redis
 npm install
-npx prisma db push          # sincroniza o schema (projeto usa db push, não migrations)
+npx prisma migrate deploy    # aplica as migrations versionadas
 npm run dev                  # API em :3000
 npm run worker:dev           # noutro terminal — processa webhooks inbound
 npm run worker:outbound:dev  # noutro terminal — processa envio outbound
@@ -73,7 +78,28 @@ npm run worker:automation:dev
 Login de teste (seed): `admin@demo.com` / `admin123`.
 
 Checagens antes de commitar: `npx tsc -p tsconfig.json --noEmit` e
-`npx oxlint src`.
+`npx oxlint src`. O CI (`.github/workflows/ci.yml`) roda isso mais o
+build e uma checagem de migrations em todo PR.
+
+## Migrations
+
+Convertido de `prisma db push` pra migrations versionadas em 23/08/2026,
+depois de um incidente em produção causado exatamente pela falta delas
+(coluna que o código já exigia, mas nunca tinha sido aplicada no banco real).
+
+- **Criar uma migration nova**: `npx prisma migrate dev --name <descrição>`
+  localmente, commitar a pasta gerada em `prisma/migrations/`.
+- **Nunca edite um arquivo de migration já commitado** — se precisar
+  corrigir algo, crie uma nova migration.
+- **CI valida que schema.prisma e migrations nunca ficam dessincronizados**
+  (aplica as migrations num Postgres limpo e compara com o schema via
+  `prisma migrate diff --exit-code`) — é o mesmo tipo de checagem que teria
+  pego o incidente de 22/08 antes do merge.
+- A migration `0_init` é o **baseline**: representa o schema inteiro no
+  momento em que migrations foram adotadas, gerada com
+  `prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma
+  --script` (não precisa de banco vivo pra gerar). Ela já está marcada como
+  aplicada em produção — não precisa rodar de novo lá.
 
 ## Deploy (produção)
 
@@ -92,18 +118,19 @@ docker service update --force crm_crm_worker_automation
 ```
 
 - **`docker-entrypoint.sh`**: só o serviço `crm_crm_api` usa esse comando
-  (`docker-stack.yml`); ele roda `npx prisma db push --skip-generate
-  --accept-data-loss` e só então sobe `node dist/server.js`. Os workers
-  sobem direto com `node dist/workers/*.js`, sem repetir o `db push`
-  (evita DDL concorrente de 4 processos no mesmo banco a cada deploy).
-- **`--accept-data-loss` é intencional**: sem ela, qualquer constraint nova
-  (ex: `@@unique`) trava o push com um erro genérico de "possível perda de
-  dados" mesmo sendo uma mudança aditiva segura, que só falharia de verdade
-  se já existisse duplicata. Isso derrubava o deploy inteiro.
+  (`docker-stack.yml`); ele roda `npx prisma migrate deploy` (aplica as
+  migrations pendentes, sem perguntar nada) e só então sobe
+  `node dist/server.js`. Os workers sobem direto com `node dist/workers/*.js`,
+  sem repetir o passo de migration (evita DDL concorrente de 4 processos no
+  mesmo banco a cada deploy).
+- **`healthcheck`** no serviço `crm_crm_api` bate em `/health` — sem ele o
+  Swarm considerava "saudável" um container travado no meio da migration ou
+  com a API não respondendo de verdade.
 - **`DATABASE_URL` vs `DIRECT_URL` (Supabase)**: `DATABASE_URL` usa o
   *Transaction pooler* (porta 6543) — é o que a app usa em runtime.
-  `DIRECT_URL` é usada só pelo `prisma db push` e **precisa ser o *Session
-  pooler*** (mesmo host do pooler, porta 5432), **nunca** a conexão direta
+  `DIRECT_URL` é usada só por operações de schema (`migrate deploy`,
+  `migrate dev`) e **precisa ser o *Session pooler*** (mesmo host do
+  pooler, porta 5432), **nunca** a conexão direta
   (`db.<projeto>.supabase.co:5432`) — essa costuma exigir IPv6 e falha com
   `P1001: Can't reach database server` em VPS comuns. Painel Supabase:
   Settings → Database → Connection string → aba "Session pooler".
@@ -119,7 +146,7 @@ docker service update --force crm_crm_worker_automation
   Swarm não é "attachable" por padrão, então rode sem `--network`, já que o
   banco é externo/Supabase):
   ```bash
-  docker run --rm --env-file .env crm-api:latest npx prisma db push --skip-generate --accept-data-loss
+  docker run --rm --env-file .env crm-api:latest npx prisma migrate deploy
   ```
 
 ## Modelos principais (`prisma/schema.prisma`)
@@ -147,7 +174,11 @@ artifact — peça pro usuário o link se precisar, ou refaça a auditoria.
 - Janela de 24h da Meta não é tratada (texto livre fora da janela é
   rejeitado pela Meta sem mensagem clara pro atendente).
 - Sem suporte a mídia (imagem/áudio/vídeo/documento) — só texto.
-- Deploy sem migrations versionadas, sem CI, sem healthcheck no Swarm.
+- ~~Deploy sem migrations versionadas, sem CI, sem healthcheck no Swarm~~ —
+  **feito em 23/08/2026**: CI (typecheck/build/lint/migrations em dia) +
+  healthcheck + migrations versionadas substituindo `db push`. Falta só
+  definir canal de alerta de erro (Sentry/Slack/e-mail — pendente de
+  decisão do usuário).
 
 **P1 — impedem operar em equipe:**
 - Sem cadastro de usuários (só existe login; criar atendente é manual no banco).
