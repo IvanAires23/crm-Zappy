@@ -97,6 +97,72 @@ export async function sendTextMessage(tenantId: string, to: string, text: string
   });
 }
 
+// Sobe o arquivo pro Meta e devolve o media id — a mensagem em si é enviada
+// depois com sendMediaMessage() referenciando esse id (a Meta hospeda o
+// arquivo, não guardamos cópia nenhuma do nosso lado).
+export async function uploadMedia(tenantId: string, buffer: Buffer, mimeType: string, filename: string) {
+  const { phoneNumberId, accessToken } = await getTenantCredentials(tenantId);
+
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("file", new Blob([Uint8Array.from(buffer)], { type: mimeType }), filename);
+
+  const res = await fetch(`${GRAPH_BASE}/${phoneNumberId}/media`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: form,
+  });
+
+  const json = await res.json();
+  if (!res.ok) {
+    throw new WhatsappApiError(res.status, json);
+  }
+  return json as { id: string };
+}
+
+export async function sendMediaMessage(
+  tenantId: string,
+  to: string,
+  type: "image" | "video" | "audio" | "document",
+  mediaId: string,
+  options?: { caption?: string; filename?: string }
+) {
+  const { phoneNumberId, accessToken } = await getTenantCredentials(tenantId);
+
+  const mediaObject: Record<string, unknown> = { id: mediaId };
+  // Áudio não aceita legenda na API da Meta — ela ignora silenciosamente,
+  // mas evitamos mandar o campo pra não confundir quem depurar o payload.
+  if (options?.caption && type !== "audio") mediaObject.caption = options.caption;
+  if (options?.filename && type === "document") mediaObject.filename = options.filename;
+
+  return graphRequest(`${phoneNumberId}/messages`, accessToken, {
+    messaging_product: "whatsapp",
+    to,
+    type,
+    [type]: mediaObject,
+  });
+}
+
+// Resolve a URL temporária (~5min) da Meta pro media id e baixa os bytes —
+// usado pelo proxy autenticado que serve mídia pro front (nem inbound nem
+// outbound ficam guardados localmente, só o media id).
+export async function downloadMedia(tenantId: string, mediaId: string) {
+  const { accessToken } = await getTenantCredentials(tenantId);
+
+  const meta = await graphGet(mediaId, accessToken);
+  const fileRes = await fetch(meta.url as string, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!fileRes.ok) {
+    throw new WhatsappApiError(fileRes.status, await fileRes.text());
+  }
+
+  return {
+    buffer: Buffer.from(await fileRes.arrayBuffer()),
+    mimeType: (meta.mime_type as string | undefined) ?? "application/octet-stream",
+  };
+}
+
 export async function sendTemplateMessage(
   tenantId: string,
   to: string,

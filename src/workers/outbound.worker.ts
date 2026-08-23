@@ -1,8 +1,12 @@
 import { Worker, type Job } from "bullmq";
 import { connection } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
-import { sendTextMessage, sendTemplateMessage } from "../whatsapp/client.js";
+import { sendTextMessage, sendTemplateMessage, sendMediaMessage } from "../whatsapp/client.js";
+import { initSentry, Sentry } from "../config/sentry.js";
+import { publishRealtimeEvent } from "../realtime/bus.js";
 import pino from "pino";
+
+initSentry();
 
 const logger = pino({ transport: { target: "pino-pretty" } });
 
@@ -12,6 +16,7 @@ interface OutboundJobData {
   to: string;
   text?: string; // envio de texto livre (conversa individual)
   template?: { name: string; languageCode: string; components?: unknown[] }; // envio de template (disparo em massa)
+  media?: { type: "image" | "video" | "audio" | "document"; id: string; caption?: string; filename?: string };
   broadcastRecipientId?: string; // presente só em jobs de disparo em massa
 }
 
@@ -37,20 +42,28 @@ async function updateBroadcastProgress(broadcastRecipientId: string, outcome: "s
 const worker = new Worker(
   "whatsapp-outbound-messages",
   async (job: Job<OutboundJobData>) => {
-    const { tenantId, messageId, to, text, template, broadcastRecipientId } = job.data;
+    const { tenantId, messageId, to, text, template, media, broadcastRecipientId } = job.data;
 
     try {
-      const result = template
-        ? await sendTemplateMessage(tenantId, to, template.name, template.languageCode, template.components)
-        : await sendTextMessage(tenantId, to, text ?? "");
+      const result = media
+        ? await sendMediaMessage(tenantId, to, media.type, media.id, { caption: media.caption, filename: media.filename })
+        : template
+          ? await sendTemplateMessage(tenantId, to, template.name, template.languageCode, template.components)
+          : await sendTextMessage(tenantId, to, text ?? "");
       const whatsappMessageId = result?.messages?.[0]?.id;
 
-      await prisma.message.update({
+      const sentMessage = await prisma.message.update({
         where: { id: messageId },
         data: {
           status: "sent",
           whatsappMessageId, // o status final (delivered/read) chega depois via webhook
         },
+      });
+
+      await publishRealtimeEvent({
+        tenantId,
+        event: "message:status",
+        data: { conversationId: sentMessage.conversationId, messageId: sentMessage.id, status: sentMessage.status },
       });
 
       if (broadcastRecipientId) {
@@ -74,9 +87,15 @@ const worker = new Worker(
         throw err;
       }
 
-      await prisma.message.update({
+      const failedMessage = await prisma.message.update({
         where: { id: messageId },
         data: { status: "failed" },
+      });
+
+      await publishRealtimeEvent({
+        tenantId,
+        event: "message:status",
+        data: { conversationId: failedMessage.conversationId, messageId: failedMessage.id, status: failedMessage.status },
       });
 
       if (broadcastRecipientId) {
@@ -91,7 +110,19 @@ const worker = new Worker(
 );
 
 worker.on("failed", (job, err) => {
+  Sentry.captureException(err, { extra: { jobId: job?.id, queue: "whatsapp-outbound-messages" } });
   logger.error({ jobId: job?.id, err }, "Job de envio falhou definitivamente");
+});
+
+process.on("uncaughtException", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "uncaughtException no worker de outbound");
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "unhandledRejection no worker de outbound");
+  process.exit(1);
 });
 
 logger.info("Worker de envio (outbound) iniciado");

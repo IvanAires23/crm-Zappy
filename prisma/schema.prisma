@@ -89,6 +89,9 @@ model User {
   email        String
   passwordHash String
   role         String   @default("agent") // admin | agent
+  // Desativar em vez de excluir — preserva o histórico de notas/tarefas/
+  // conversas já atribuídas a esse usuário. Login rejeita active=false.
+  active       Boolean  @default(true)
 
   createdAt    DateTime @default(now())
 
@@ -98,10 +101,28 @@ model User {
   assignedCalendarEvents CalendarEvent[] @relation("AssignedCalendarEvent")
   googleCalendarAccount  GoogleCalendarAccount?
   notes                  Note[]
+  refreshTokens          RefreshToken[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
   @@map("users")
+}
+
+// Sessão de longa duração — o access token (JWT) dura pouco (1h) e some;
+// o refresh token permite renovар sem pedir login de novo, evitando a
+// sessão cair no meio do expediente. Guardamos só o hash (nunca o token
+// em texto puro) e giramos (revoga + emite um novo) a cada refresh.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
 }
 
 // ------------------------------------------------------------------
@@ -146,6 +167,15 @@ model Conversation {
   assignedUser   User?    @relation("AssignedAgent", fields: [assignedUserId], references: [id])
 
   lastMessageAt  DateTime @default(now())
+  // Marcador único de leitura (não por usuário — atribuição de conversa
+  // não afeta quem vê o quê, é só sobre quem é responsável por responder).
+  // "Não lida" é derivado: lastMessageAt > lastReadAt E a última mensagem
+  // é inbound.
+  lastReadAt     DateTime?
+  // Janela de 24h da Meta: texto/mídia livre só pode ser enviado até 24h
+  // depois da última mensagem do CLIENTE (não de qualquer mensagem, por
+  // isso não dá pra reusar lastMessageAt). Fora da janela, só template.
+  lastInboundMessageAt DateTime?
   createdAt      DateTime @default(now())
 
   messages       Message[]
@@ -154,6 +184,8 @@ model Conversation {
 
   @@index([tenantId])
   @@index([tenantId, status])
+  @@index([tenantId, lastMessageAt]) // ordenação da lista de conversas
+  @@index([tenantId, assignedUserId]) // filtro "minhas conversas" / "sem atendente"
   @@map("conversations")
 }
 
@@ -214,6 +246,7 @@ model Message {
 
   @@index([tenantId])
   @@index([conversationId])
+  @@index([conversationId, createdAt]) // paginação por cursor do histórico
   @@map("messages")
 }
 

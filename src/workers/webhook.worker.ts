@@ -1,7 +1,11 @@
 import { Worker, type Job } from "bullmq";
 import { connection } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
+import { initSentry, Sentry } from "../config/sentry.js";
+import { publishRealtimeEvent } from "../realtime/bus.js";
 import pino from "pino";
+
+initSentry();
 
 const logger = pino({ transport: { target: "pino-pretty" } });
 
@@ -115,7 +119,7 @@ async function handleInboundMessage(
     });
   }
 
-  await prisma.message.create({
+  const message = await prisma.message.create({
     data: {
       tenantId,
       conversationId: conversation.id,
@@ -127,9 +131,13 @@ async function handleInboundMessage(
     },
   });
 
+  const now = new Date();
   await prisma.conversation.update({
     where: { id: conversation.id },
-    data: { lastMessageAt: new Date() },
+    // lastInboundMessageAt é a base da janela de 24h da Meta — só conta
+    // mensagem do cliente, por isso é separado de lastMessageAt (que
+    // também muda com mensagem nossa, no echo abaixo por exemplo).
+    data: { lastMessageAt: now, lastInboundMessageAt: now },
   });
 
   await prisma.webhookEvent.update({
@@ -137,7 +145,12 @@ async function handleInboundMessage(
     data: { processedAt: new Date() },
   });
 
-  // TODO: emitir evento via Socket.io pro frontend do tenant em tempo real
+  await publishRealtimeEvent({
+    tenantId,
+    event: "message:new",
+    data: { conversationId: conversation.id, message },
+  });
+
   logger.info({ tenantId, conversationId: conversation.id }, "Mensagem inbound processada");
 }
 
@@ -153,10 +166,22 @@ async function handleStatusUpdate(tenantId: string, phoneNumberId: string, statu
     update: { payload: status },
   });
 
-  await prisma.message.updateMany({
+  const existingMessage = await prisma.message.findFirst({
     where: { tenantId, whatsappMessageId: status.id },
-    data: { status: status.status }, // sent | delivered | read | failed
   });
+
+  if (existingMessage) {
+    const updated = await prisma.message.update({
+      where: { id: existingMessage.id },
+      data: { status: status.status }, // sent | delivered | read | failed
+    });
+
+    await publishRealtimeEvent({
+      tenantId,
+      event: "message:status",
+      data: { conversationId: updated.conversationId, messageId: updated.id, status: updated.status },
+    });
+  }
 
   await prisma.webhookEvent.update({
     where: { whatsappEventKey: eventKey },
@@ -209,7 +234,7 @@ async function handleMessageEcho(tenantId: string, phoneNumberId: string, echo: 
 
   const conversation = await findOrCreateOpenConversation(tenantId, contact.id);
 
-  await prisma.message.create({
+  const message = await prisma.message.create({
     data: {
       tenantId,
       conversationId: conversation.id,
@@ -230,6 +255,12 @@ async function handleMessageEcho(tenantId: string, phoneNumberId: string, echo: 
   await prisma.webhookEvent.update({
     where: { whatsappEventKey: eventKey },
     data: { processedAt: new Date() },
+  });
+
+  await publishRealtimeEvent({
+    tenantId,
+    event: "message:new",
+    data: { conversationId: conversation.id, message },
   });
 
   logger.info({ tenantId, conversationId: conversation.id }, "Echo de mensagem do app processado");
@@ -305,7 +336,19 @@ async function handleHistorySync(tenantId: string, phoneNumberId: string, histor
 }
 
 worker.on("failed", (job, err) => {
+  Sentry.captureException(err, { extra: { jobId: job?.id, queue: "whatsapp-webhook-events" } });
   logger.error({ jobId: job?.id, err }, "Falha ao processar evento de webhook — vai pra retry/DLQ");
+});
+
+process.on("uncaughtException", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "uncaughtException no worker de webhook");
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "unhandledRejection no worker de webhook");
+  process.exit(1);
 });
 
 logger.info("Worker de webhook iniciado");

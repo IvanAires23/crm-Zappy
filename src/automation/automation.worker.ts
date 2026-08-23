@@ -6,6 +6,9 @@ import { prisma } from "../db/prisma.js";
 import { emitAutomationEvent } from "./emit.js";
 import { executeAction, type RuleAction } from "./actions.js";
 import { pullAllConnectedGoogleCalendars } from "../integrations/googleCalendar/googleCalendarSync.js";
+import { initSentry, Sentry } from "../config/sentry.js";
+
+initSentry();
 
 const logger = pino({ transport: { target: "pino-pretty" } });
 
@@ -87,6 +90,8 @@ const dispatchWorker = new Worker(
 dispatchWorker.on("failed", async (job, err) => {
   if (!job) return;
 
+  Sentry.captureException(err, { extra: { jobId: job.id, jobName: job.name } });
+
   if (job.name === "execute-rule") {
     await prisma.automationRuleRun.updateMany({
       where: { jobId: job.id! },
@@ -161,7 +166,7 @@ async function checkCalendarReminders() {
   }
 }
 
-new Worker(
+const schedulerWorker = new Worker(
   "crm-scheduler-tick",
   async () => {
     await checkOverdueTasks();
@@ -171,8 +176,24 @@ new Worker(
   { connection, concurrency: 1 }
 );
 
+schedulerWorker.on("failed", (job, err) => {
+  Sentry.captureException(err, { extra: { jobId: job?.id, queue: "crm-scheduler-tick" } });
+  logger.error({ jobId: job?.id, err }, "Tick do scheduler falhou");
+});
+
 // Job repetível nativo do BullMQ — não precisa de lib de cron externa.
 // jobId fixo evita duplicar o agendamento se o worker reiniciar.
 await schedulerQueue.add("tick", {}, { repeat: { every: SCHEDULER_INTERVAL_MS }, jobId: "scheduler-tick" });
 
 logger.info({ intervalMs: SCHEDULER_INTERVAL_MS }, "Scheduler iniciado");
+
+process.on("uncaughtException", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "uncaughtException no worker de automação");
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "unhandledRejection no worker de automação");
+  process.exit(1);
+});

@@ -13,11 +13,14 @@ services:
     networks:
       - talks_network
     # Sem isso, o Swarm considera o container "saudável" assim que o
-    # processo sobe — mesmo que o entrypoint tenha travado no meio do
-    # "prisma db push" ou que a API não esteja realmente respondendo.
-    # start_period dá folga pro db push rodar antes de contar falha.
+    # processo sobe — mesmo que o entrypoint tenha travado no meio da
+    # migration ou que a API não esteja realmente respondendo.
+    # start_period dá folga pro "prisma migrate deploy" rodar antes de
+    # contar falha. 127.0.0.1 (não "localhost"): em Alpine o "localhost"
+    # pode resolver pra ::1 (IPv6) primeiro, e o server só escuta em
+    # IPv4 — isso derrubou um container à toa (exit 137: unhealthy).
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
       interval: 15s
       timeout: 5s
       retries: 3
