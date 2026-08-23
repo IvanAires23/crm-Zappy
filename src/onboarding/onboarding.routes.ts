@@ -28,13 +28,33 @@ async function graphFetch(url: string, init: RequestInit = {}) {
 
 const completeSignupSchema = z.object({
   code: z.string().min(1), // authorization code retornado pelo FB.login() no frontend
-  wabaId: z.string().min(1),
-  // Fluxo padrão (número novo) já manda o phoneNumberId no evento 'FINISH'.
-  // Fluxo de coexistência (número já ativo no WhatsApp Business App) só manda
-  // o waba_id no evento 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING' — nesse
-  // caso descobrimos o phoneNumberId aqui no backend.
+  // Os dois vêm do evento postMessage do Embedded Signup, que nem sempre
+  // chega: quando o usuário já autorizou o app antes, a Meta mostra a tela
+  // "continuar com as definições anteriores", devolve o code na hora e pula
+  // o fluxo do WhatsApp — sem FINISH, sem waba_id. Por isso são opcionais e
+  // o backend descobre os dois a partir do próprio token.
+  wabaId: z.string().min(1).optional(),
   phoneNumberId: z.string().min(1).optional(),
 });
+
+// Descobre as WABAs que o token concedeu, sem depender do postMessage do
+// popup. O /debug_token devolve granular_scopes e, nos escopos de WhatsApp,
+// os target_ids são exatamente os IDs das WABAs autorizadas.
+async function resolveWabaIdFromToken(accessToken: string): Promise<string | undefined> {
+  const url = new URL(`${GRAPH_BASE}/debug_token`);
+  url.searchParams.set("input_token", accessToken);
+  url.searchParams.set("access_token", `${env.META_APP_ID}|${env.META_APP_SECRET}`);
+
+  const res = await graphFetch(url.toString());
+  const json = await res.json().catch(() => ({}));
+
+  const scopes: { scope?: string; target_ids?: string[] }[] = json?.data?.granular_scopes ?? [];
+  const whatsappScope =
+    scopes.find((s) => s.scope === "whatsapp_business_management") ??
+    scopes.find((s) => s.scope === "whatsapp_business_messaging");
+
+  return whatsappScope?.target_ids?.[0];
+}
 
 export async function onboardingRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
@@ -70,7 +90,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const tenantId = request.auth.tenantId;
-    const { code, wabaId } = parsed.data;
+    const { code } = parsed.data;
 
     // 1) Trocar o code por um token de acesso de negócio
     const tokenUrl = new URL(`${GRAPH_BASE}/oauth/access_token`);
@@ -88,7 +108,19 @@ export async function onboardingRoutes(app: FastifyInstance) {
 
     const accessToken: string = tokenJson.access_token;
 
-    // 2) Descobrir o phoneNumberId quando o frontend não mandou (caso do
+    // 2) Descobrir a WABA quando o popup não mandou o waba_id.
+    const wabaId = parsed.data.wabaId ?? (await resolveWabaIdFromToken(accessToken));
+
+    if (!wabaId) {
+      request.log.error({ tenantId }, "Token sem WABA associada nos granular_scopes");
+      return reply.status(400).send({
+        error:
+          "A autorização da Meta não trouxe nenhuma conta do WhatsApp Business. " +
+          "Refaça a conexão escolhendo 'Editar definições' no popup e conclua o cadastro do número.",
+      });
+    }
+
+    // 3) Descobrir o phoneNumberId quando o frontend não mandou (caso do
     //    fluxo de coexistência, que só devolve o waba_id).
     let phoneNumberId = parsed.data.phoneNumberId;
     if (!phoneNumberId) {
@@ -99,15 +131,17 @@ export async function onboardingRoutes(app: FastifyInstance) {
       phoneNumberId = numbersJson?.data?.[0]?.id;
 
       if (!phoneNumberId) {
-        request.log.error({ numbersJson }, "Não achei phoneNumberId pra essa WABA");
+        request.log.error({ numbersJson, wabaId }, "Não achei phoneNumberId pra essa WABA");
         return reply.status(400).send({
-          error: "Não foi possível descobrir o phoneNumberId da WABA informada",
+          error:
+            "A conta do WhatsApp Business foi autorizada, mas ainda não tem nenhum número. " +
+            "Conclua o cadastro do número no popup da Meta e tente de novo.",
           details: numbersJson,
         });
       }
     }
 
-    // 3) Checar se é um número em coexistência (ativo também no WhatsApp
+    // 4) Checar se é um número em coexistência (ativo também no WhatsApp
     //    Business App do celular) — isso muda os próximos passos.
     const { isOnBizApp, platformType } = await checkCoexistenceStatus(phoneNumberId, accessToken);
 
@@ -142,7 +176,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
       }
     }
 
-    // 4) Persistir, criptografando o token
+    // 5) Persistir, criptografando o token
     const account = await prisma.tenantWhatsappAccount.upsert({
       where: { phoneNumberId },
       create: {
