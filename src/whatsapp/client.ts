@@ -29,6 +29,17 @@ async function getTenantAccount(tenantId: string) {
   return account;
 }
 
+// Pra decisões que dependem só de "qual provider esse tenant usa" (ex: a
+// janela de 24h, que é uma regra só da Cloud API oficial) — não lança se
+// não achar conta, porque essas decisões têm um fallback razoável (ver
+// isMessagingRestricted em src/whatsapp/window.ts).
+export async function getTenantProvider(tenantId: string): Promise<string | null> {
+  const account = await prisma.tenantWhatsappAccount.findFirst({
+    where: { tenantId, tokenStatus: "active" },
+  });
+  return account?.provider ?? null;
+}
+
 async function getTenantCredentials(tenantId: string) {
   const account = await getTenantAccount(tenantId);
 
