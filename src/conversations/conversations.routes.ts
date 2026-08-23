@@ -4,8 +4,8 @@ import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
 import { outboundQueue } from "../queue/queue.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
-import { uploadMedia } from "../whatsapp/client.js";
-import { isWithinWindow } from "../whatsapp/window.js";
+import { uploadMedia, getTenantProvider } from "../whatsapp/client.js";
+import { isWithinWindow, isMessagingRestricted } from "../whatsapp/window.js";
 
 function whatsappTypeForMime(mimeType: string): "image" | "video" | "audio" | "document" {
   if (mimeType.startsWith("image/")) return "image";
@@ -97,6 +97,10 @@ export async function conversationsRoutes(app: FastifyInstance) {
     const hasMore = conversations.length > limit;
     const page = hasMore ? conversations.slice(0, limit) : conversations;
 
+    // Uma consulta só pro tenant inteiro, não por conversa — a janela de
+    // 24h só existe pra Cloud API oficial (ver isMessagingRestricted).
+    const provider = await getTenantProvider(request.auth.tenantId);
+
     const result = page.map(({ messages, ...conversation }) => {
       const lastMessage = messages[0];
       const unread =
@@ -108,7 +112,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
         lastMessagePreview: extractMessagePreview(lastMessage),
         lastMessageDirection: lastMessage?.direction ?? null,
         unread,
-        withinWindow: isWithinWindow(conversation.lastInboundMessageAt),
+        withinWindow: !isMessagingRestricted(provider, conversation.lastInboundMessageAt),
       };
     });
 
@@ -170,7 +174,8 @@ export async function conversationsRoutes(app: FastifyInstance) {
     if (!conversation) {
       return reply.status(404).send({ error: "Conversa não encontrada" });
     }
-    if (!isWithinWindow(conversation.lastInboundMessageAt)) {
+    const provider = await getTenantProvider(request.auth.tenantId);
+    if (isMessagingRestricted(provider, conversation.lastInboundMessageAt)) {
       return reply.status(409).send({
         error: "Fora da janela de 24h — envie um template pra reabrir a conversa",
       });

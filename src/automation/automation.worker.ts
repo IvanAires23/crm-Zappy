@@ -6,7 +6,8 @@ import { prisma } from "../db/prisma.js";
 import { emitAutomationEvent } from "./emit.js";
 import { executeAction, type RuleAction } from "./actions.js";
 import { pullAllConnectedGoogleCalendars } from "../integrations/googleCalendar/googleCalendarSync.js";
-import { isWithinWindow } from "../whatsapp/window.js";
+import { isMessagingRestricted } from "../whatsapp/window.js";
+import { getTenantProvider } from "../whatsapp/client.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import { initSentry, Sentry } from "../config/sentry.js";
 
@@ -181,7 +182,8 @@ async function checkScheduledMessages() {
   });
 
   for (const scheduled of due) {
-    if (!isWithinWindow(scheduled.conversation.lastInboundMessageAt)) {
+    const provider = await getTenantProvider(scheduled.tenantId);
+    if (isMessagingRestricted(provider, scheduled.conversation.lastInboundMessageAt)) {
       await prisma.scheduledMessage.update({
         where: { id: scheduled.id },
         data: { status: "failed", error: "Janela de 24h fechou antes do horário agendado" },
