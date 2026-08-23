@@ -8,6 +8,24 @@ import { authenticate } from "../auth/auth.plugin.js";
 
 const GRAPH_BASE = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}`;
 
+// O `code` do Embedded Signup expira rápido e o frontend fica com o botão em
+// "Conectando..." enquanto esta rota não responde. Um fetch sem timeout contra
+// a Graph API pode pendurar a requisição inteira, então cada chamada tem um
+// limite próprio e vira um erro legível em vez de um travamento.
+const GRAPH_TIMEOUT_MS = 15_000;
+
+async function graphFetch(url: string, init: RequestInit = {}) {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS) });
+  } catch (err) {
+    const name = (err as Error).name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      throw new Error("A Meta não respondeu a tempo. Tente conectar novamente.");
+    }
+    throw err;
+  }
+}
+
 const completeSignupSchema = z.object({
   code: z.string().min(1), // authorization code retornado pelo FB.login() no frontend
   wabaId: z.string().min(1),
@@ -60,8 +78,8 @@ export async function onboardingRoutes(app: FastifyInstance) {
     tokenUrl.searchParams.set("client_secret", env.META_APP_SECRET);
     tokenUrl.searchParams.set("code", code);
 
-    const tokenRes = await fetch(tokenUrl.toString());
-    const tokenJson = await tokenRes.json();
+    const tokenRes = await graphFetch(tokenUrl.toString());
+    const tokenJson = await tokenRes.json().catch(() => ({}));
 
     if (!tokenRes.ok || !tokenJson.access_token) {
       request.log.error({ tokenJson }, "Falha ao trocar code por access_token");
@@ -74,10 +92,10 @@ export async function onboardingRoutes(app: FastifyInstance) {
     //    fluxo de coexistência, que só devolve o waba_id).
     let phoneNumberId = parsed.data.phoneNumberId;
     if (!phoneNumberId) {
-      const numbersRes = await fetch(
+      const numbersRes = await graphFetch(
         `${GRAPH_BASE}/${wabaId}/phone_numbers?access_token=${accessToken}`
       );
-      const numbersJson = await numbersRes.json();
+      const numbersJson = await numbersRes.json().catch(() => ({}));
       phoneNumberId = numbersJson?.data?.[0]?.id;
 
       if (!phoneNumberId) {
@@ -102,7 +120,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
       await triggerSmbAppDataSync(phoneNumberId, accessToken, "history");
     } else {
       // Fluxo padrão: registra o número na Cloud API.
-      await fetch(`${GRAPH_BASE}/${phoneNumberId}/register`, {
+      const registerRes = await graphFetch(`${GRAPH_BASE}/${phoneNumberId}/register`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -110,6 +128,18 @@ export async function onboardingRoutes(app: FastifyInstance) {
         },
         body: JSON.stringify({ messaging_product: "whatsapp" }),
       });
+
+      // O /register falhava em silêncio: a conta era salva como "conectada"
+      // mesmo sem o número estar registrado na Cloud API, e o erro só aparecia
+      // muito depois, na hora de enviar mensagem.
+      if (!registerRes.ok) {
+        const registerJson = await registerRes.json().catch(() => ({}));
+        request.log.error({ registerJson, phoneNumberId }, "Falha ao registrar o número na Cloud API");
+        return reply.status(400).send({
+          error: "Não foi possível registrar o número na Cloud API do WhatsApp",
+          details: registerJson,
+        });
+      }
     }
 
     // 4) Persistir, criptografando o token
