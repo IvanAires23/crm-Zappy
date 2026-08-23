@@ -5,25 +5,35 @@ import { webhookQueue } from "../queue/queue.js";
 
 export async function webhookRoutes(app: FastifyInstance) {
   // 1) Verificação do webhook (a Meta chama isso uma vez, ao configurar)
-  app.get("/webhook", async (request, reply) => {
-    const query = request.query as Record<string, string>;
-    const mode = query["hub.mode"];
-    const token = query["hub.verify_token"];
-    const challenge = query["hub.challenge"];
+  app.get(
+    "/webhook",
+    // Sem rate limit: é a Meta chamando, autenticada pelo verify_token, não
+    // um usuário — nada a ganhar limitando e um risco real de bloquear a
+    // reconfiguração do webhook num pico de tráfego.
+    { config: { rateLimit: false } },
+    async (request, reply) => {
+      const query = request.query as Record<string, string>;
+      const mode = query["hub.mode"];
+      const token = query["hub.verify_token"];
+      const challenge = query["hub.challenge"];
 
-    if (mode === "subscribe" && token === env.META_WEBHOOK_VERIFY_TOKEN) {
-      return reply.status(200).send(challenge);
+      if (mode === "subscribe" && token === env.META_WEBHOOK_VERIFY_TOKEN) {
+        return reply.status(200).send(challenge);
+      }
+
+      return reply.status(403).send("Forbidden");
     }
-
-    return reply.status(403).send("Forbidden");
-  });
+  );
 
   // 2) Recepção de eventos — regra de ouro: validar, enfileirar, responder rápido.
   app.post(
     "/webhook",
     {
       // Precisamos do corpo cru pra validar a assinatura HMAC antes do parse.
-      config: { rawBody: true },
+      // Sem rate limit pelo mesmo motivo do GET acima — a assinatura HMAC já
+      // filtra requisição forjada, então limitar por IP só arrisca derrubar
+      // mensagens reais num pico (broadcast com muita gente respondendo).
+      config: { rawBody: true, rateLimit: false },
     },
     async (request, reply) => {
       const signature = request.headers["x-hub-signature-256"] as string | undefined;

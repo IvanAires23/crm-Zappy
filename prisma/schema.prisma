@@ -101,10 +101,28 @@ model User {
   assignedCalendarEvents CalendarEvent[] @relation("AssignedCalendarEvent")
   googleCalendarAccount  GoogleCalendarAccount?
   notes                  Note[]
+  refreshTokens          RefreshToken[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
   @@map("users")
+}
+
+// Sessão de longa duração — o access token (JWT) dura pouco (1h) e some;
+// o refresh token permite renovар sem pedir login de novo, evitando a
+// sessão cair no meio do expediente. Guardamos só o hash (nunca o token
+// em texto puro) e giramos (revoga + emite um novo) a cada refresh.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
 }
 
 // ------------------------------------------------------------------

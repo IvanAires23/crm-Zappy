@@ -22,6 +22,10 @@ const envSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().optional(),
   FRONTEND_URL: z.string().default("http://localhost:5173"),
+  // Origens extras liberadas no CORS além de FRONTEND_URL (separadas por
+  // vírgula) — ex: domínio de preview do Vercel. Sem isso, CORS só libera
+  // FRONTEND_URL (antes era origin:true, aberto pra qualquer site).
+  CORS_ORIGINS: z.string().optional(),
 
   // Captura de erro em produção — opcional: sem ela, o Sentry simplesmente
   // não é inicializado (ver src/config/sentry.ts).

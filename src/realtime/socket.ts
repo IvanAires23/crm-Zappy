@@ -3,6 +3,7 @@ import { Server as SocketIOServer } from "socket.io";
 import jwt from "jsonwebtoken";
 import { Redis } from "ioredis";
 import { env } from "../config/env.js";
+import { allowedOrigins } from "../config/corsOrigins.js";
 import { REALTIME_CHANNEL } from "./bus.js";
 import type { RealtimeEnvelope } from "./events.js";
 import type { AuthPayload } from "../auth/auth.plugin.js";
@@ -13,7 +14,7 @@ import { Sentry } from "../config/sentry.js";
 // re-emite pros clientes conectados.
 export function setupRealtime(httpServer: HTTPServer) {
   const io = new SocketIOServer(httpServer, {
-    cors: { origin: true },
+    cors: { origin: allowedOrigins },
   });
 
   io.use((socket, next) => {

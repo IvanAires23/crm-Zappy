@@ -1,8 +1,11 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
+import rateLimit from "@fastify/rate-limit";
 import multipart from "@fastify/multipart";
 import rawBody from "fastify-raw-body";
 import { env } from "./config/env.js";
+import { allowedOrigins } from "./config/corsOrigins.js";
 import { initSentry, Sentry } from "./config/sentry.js";
 import { webhookRoutes } from "./webhook/webhook.routes.js";
 import { onboardingRoutes } from "./onboarding/onboarding.routes.js";
@@ -63,7 +66,22 @@ app.setErrorHandler((error, request, reply) => {
 });
 
 async function main() {
-  await app.register(cors, { origin: true });
+  await app.register(cors, { origin: allowedOrigins });
+
+  // crossOriginResourcePolicy precisa ser "cross-origin": o front carrega
+  // mídia (imagem/áudio/vídeo) direto de <img>/<audio>/<video> apontando
+  // pra API, que fica num domínio diferente — o padrão do helmet
+  // (same-origin) bloquearia esse carregamento no navegador.
+  await app.register(helmet, {
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  });
+
+  // Limite geral (por IP) contra abuso/scraping; rotas sensíveis (login)
+  // têm um limite mais rígido próprio, ver auth.routes.ts.
+  await app.register(rateLimit, {
+    max: 300,
+    timeWindow: "1 minute",
+  });
 
   // Upload de mídia (imagem/áudio/vídeo/documento) pro envio em conversas —
   // limite de 16MB, o mesmo teto que a própria Meta aplica pra mídia.
