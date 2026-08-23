@@ -5,6 +5,7 @@ import { prisma } from "../db/prisma.js";
 import { encryptToken } from "../config/crypto.js";
 import { checkCoexistenceStatus, triggerSmbAppDataSync } from "../whatsapp/client.js";
 import { authenticate } from "../auth/auth.plugin.js";
+import { publishBaileysCommand } from "../whatsapp/baileysCommands.js";
 
 const GRAPH_BASE = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}`;
 
@@ -70,16 +71,59 @@ export async function onboardingRoutes(app: FastifyInstance) {
     }
 
     return reply.send({
-      connected: true,
+      connected: account.provider === "baileys" ? account.baileysStatus === "connected" : true,
       account: {
+        provider: account.provider,
         phoneNumberId: account.phoneNumberId,
         displayPhoneNumber: account.displayPhoneNumber,
         wabaId: account.wabaId,
         qualityRating: account.qualityRating,
         tokenStatus: account.tokenStatus,
         isCoexistence: account.isCoexistence,
+        baileysStatus: account.baileysStatus,
       },
     });
+  });
+
+  // Inicia (ou reinicia) uma conexão via API não oficial (Baileys/QR Code).
+  // Só publica o comando pro worker dedicado (que segura o socket de
+  // verdade) e devolve na hora — o QR chega pro front pelo WebSocket
+  // (evento "whatsapp:qr"), não na resposta desta rota.
+  app.post("/onboarding/whatsapp/unofficial/start", async (request, reply) => {
+    const tenantId = request.auth.tenantId;
+
+    const existing = await prisma.tenantWhatsappAccount.findFirst({
+      where: { tenantId, provider: "baileys" },
+    });
+
+    if (existing) {
+      await prisma.tenantWhatsappAccount.update({
+        where: { id: existing.id },
+        data: { baileysStatus: "connecting" },
+      });
+    } else {
+      await prisma.tenantWhatsappAccount.create({
+        data: {
+          tenantId,
+          provider: "baileys",
+          phoneNumberId: `baileys:${tenantId}`,
+          tokenStatus: "active",
+          baileysStatus: "connecting",
+        },
+      });
+    }
+
+    await publishBaileysCommand({ tenantId, action: "start" });
+
+    return reply.status(202).send({ started: true });
+  });
+
+  // Desconecta a sessão Baileys ativa (equivalente a "sair" do WhatsApp Web
+  // pelo celular) — as credenciais antigas são invalidadas, uma nova
+  // conexão exige escanear um QR novo.
+  app.post("/onboarding/whatsapp/unofficial/logout", async (request, reply) => {
+    await publishBaileysCommand({ tenantId: request.auth.tenantId, action: "logout" });
+    return reply.status(202).send({ loggedOut: true });
   });
 
   // Chamado pelo frontend logo após o FB.login() do Embedded Signup retornar o `code`.

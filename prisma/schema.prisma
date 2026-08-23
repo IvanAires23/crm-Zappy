@@ -55,12 +55,17 @@ model TenantWhatsappAccount {
   tenantId          String
   tenant            Tenant   @relation(fields: [tenantId], references: [id])
 
-  wabaId            String   // WhatsApp Business Account ID
-  phoneNumberId     String   @unique // usado para rotear webhooks -> tenant
+  // "cloud_api" (Embedded Signup oficial da Meta) | "baileys" (WhatsApp Web
+  // não oficial, conexão por QR Code — usado enquanto o App Review da Meta
+  // não sai, ou por tenants que preferem não passar pela revisão).
+  provider          String   @default("cloud_api")
+
+  wabaId            String?  // WhatsApp Business Account ID — só cloud_api
+  phoneNumberId     String   @unique // usado para rotear webhooks -> tenant; sintético (baileys:<tenantId>) quando provider=baileys
   businessId        String?
   displayPhoneNumber String?
 
-  accessTokenEncrypted String  // token de acesso do tenant, criptografado
+  accessTokenEncrypted String? // token de acesso do tenant, criptografado — só cloud_api
   tokenStatus           String @default("active") // active | revoked | expired
 
   qualityRating     String?  // GREEN | YELLOW | RED
@@ -71,6 +76,15 @@ model TenantWhatsappAccount {
   isCoexistence      Boolean  @default(false)
   platformType       String?  // CLOUD_API | ON_PREMISE (retornado pela Graph API)
   historySyncStatus  String?  // pending | in_progress | completed | declined | failed
+
+  // Credenciais da sessão Baileys (par de chaves + creds do multi-device),
+  // serializadas em JSON e criptografadas com o mesmo encryptToken() usado
+  // pro access token da Cloud API. Só existe quando provider=baileys.
+  baileysAuthState  String?  @db.Text
+  // qr_pending (esperando o usuário escanear) | connecting | connected |
+  // disconnected | logged_out (usuário deslogou pelo celular — precisa
+  // gerar um QR novo, as credenciais antigas não servem mais).
+  baileysStatus     String?
 
   connectedAt       DateTime @default(now())
   updatedAt         DateTime @updatedAt

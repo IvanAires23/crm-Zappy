@@ -1,8 +1,15 @@
 import { env } from "../config/env.js";
 import { decryptToken } from "../config/crypto.js";
 import { prisma } from "../db/prisma.js";
+import { unofficialSendQueue, unofficialSendQueueEvents } from "../queue/queue.js";
 
 const GRAPH_BASE = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}`;
+
+// Tempo de espera pela resposta do worker de Baileys (que segura o socket
+// de verdade — ver src/workers/baileys.worker.ts) via a fila
+// whatsapp-unofficial-send. Generoso porque o envio em si é rápido, mas o
+// job pode ficar um instante na fila se o worker estiver ocupado.
+const UNOFFICIAL_SEND_TIMEOUT_MS = 30_000;
 
 class WhatsappApiError extends Error {
   constructor(public status: number, public body: unknown) {
@@ -10,7 +17,7 @@ class WhatsappApiError extends Error {
   }
 }
 
-async function getTenantCredentials(tenantId: string) {
+async function getTenantAccount(tenantId: string) {
   const account = await prisma.tenantWhatsappAccount.findFirst({
     where: { tenantId, tokenStatus: "active" },
   });
@@ -19,10 +26,32 @@ async function getTenantCredentials(tenantId: string) {
     throw new Error(`Tenant ${tenantId} não tem conta WhatsApp ativa`);
   }
 
+  return account;
+}
+
+async function getTenantCredentials(tenantId: string) {
+  const account = await getTenantAccount(tenantId);
+
+  if (account.provider !== "cloud_api" || !account.accessTokenEncrypted) {
+    throw new Error(
+      `Tenant ${tenantId} não usa a Cloud API oficial (provider=${account.provider}) — essa operação só existe pra esse provider`
+    );
+  }
+
   return {
     phoneNumberId: account.phoneNumberId,
     accessToken: decryptToken(account.accessTokenEncrypted),
   };
+}
+
+// Envio pela API não oficial (Baileys/QR Code): o socket de verdade só
+// existe no processo do worker dedicado, então a mensagem vai por uma fila
+// BullMQ e esperamos o job terminar — dá pra tratar como uma chamada
+// normal (await) mesmo estando em outro processo.
+async function sendTextViaUnofficial(tenantId: string, to: string, text: string) {
+  const job = await unofficialSendQueue.add("send-text", { tenantId, to, text });
+  const result = await job.waitUntilFinished(unofficialSendQueueEvents, UNOFFICIAL_SEND_TIMEOUT_MS);
+  return { messages: [{ id: result?.id ?? undefined }] };
 }
 
 async function graphRequest(path: string, accessToken: string, body: unknown) {
@@ -87,6 +116,12 @@ export async function triggerSmbAppDataSync(
 }
 
 export async function sendTextMessage(tenantId: string, to: string, text: string) {
+  const account = await getTenantAccount(tenantId);
+
+  if (account.provider === "baileys") {
+    return sendTextViaUnofficial(tenantId, to, text);
+  }
+
   const { phoneNumberId, accessToken } = await getTenantCredentials(tenantId);
 
   return graphRequest(`${phoneNumberId}/messages`, accessToken, {
