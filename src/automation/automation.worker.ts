@@ -1,11 +1,13 @@
 import { Worker, type Job } from "bullmq";
 import crypto from "node:crypto";
 import pino from "pino";
-import { connection, schedulerQueue } from "../queue/queue.js";
+import { connection, schedulerQueue, outboundQueue } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
 import { emitAutomationEvent } from "./emit.js";
 import { executeAction, type RuleAction } from "./actions.js";
 import { pullAllConnectedGoogleCalendars } from "../integrations/googleCalendar/googleCalendarSync.js";
+import { isWithinWindow } from "../whatsapp/window.js";
+import { publishRealtimeEvent } from "../realtime/bus.js";
 import { initSentry, Sentry } from "../config/sentry.js";
 
 initSentry();
@@ -166,11 +168,68 @@ async function checkCalendarReminders() {
   }
 }
 
+// Mensagens agendadas pelo atendente (ver POST /conversations/:id/scheduled-messages)
+// — a janela de 24h é checada de novo aqui, não só na criação, porque
+// pode ter fechado entre o agendamento e o horário marcado. Se fechou,
+// marca "failed" em vez de tentar enviar (evita um erro genérico da Meta
+// sem contexto nenhum pro atendente entender depois).
+async function checkScheduledMessages() {
+  const now = new Date();
+  const due = await prisma.scheduledMessage.findMany({
+    where: { status: "pending", scheduledFor: { lte: now } },
+    include: { conversation: { include: { contact: true } } },
+  });
+
+  for (const scheduled of due) {
+    if (!isWithinWindow(scheduled.conversation.lastInboundMessageAt)) {
+      await prisma.scheduledMessage.update({
+        where: { id: scheduled.id },
+        data: { status: "failed", error: "Janela de 24h fechou antes do horário agendado" },
+      });
+      continue;
+    }
+
+    const message = await prisma.$transaction(async (tx) => {
+      const created = await tx.message.create({
+        data: {
+          tenantId: scheduled.tenantId,
+          conversationId: scheduled.conversationId,
+          direction: "outbound",
+          type: "text",
+          content: { text: scheduled.text },
+          status: "pending",
+        },
+      });
+      await tx.conversation.update({ where: { id: scheduled.conversationId }, data: { lastMessageAt: now } });
+      await tx.scheduledMessage.update({ where: { id: scheduled.id }, data: { status: "sent" } });
+      return created;
+    });
+
+    await outboundQueue.add("send-message", {
+      tenantId: scheduled.tenantId,
+      messageId: message.id,
+      to: scheduled.conversation.contact.phone,
+      text: scheduled.text,
+    });
+
+    await publishRealtimeEvent({
+      tenantId: scheduled.tenantId,
+      event: "message:new",
+      data: { conversationId: scheduled.conversationId, message },
+    });
+  }
+
+  if (due.length > 0) {
+    logger.info({ count: due.length }, "Mensagens agendadas processadas");
+  }
+}
+
 const schedulerWorker = new Worker(
   "crm-scheduler-tick",
   async () => {
     await checkOverdueTasks();
     await checkCalendarReminders();
+    await checkScheduledMessages();
     await pullAllConnectedGoogleCalendars();
   },
   { connection, concurrency: 1 }

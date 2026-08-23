@@ -39,6 +39,8 @@ model Tenant {
   googleCalendarAccounts     GoogleCalendarAccount[]
   notes                      Note[]
   quickReplies               QuickReply[]
+  chatbotRules               ChatbotRule[]
+  scheduledMessages          ScheduledMessage[]
 
   @@map("tenants")
 }
@@ -102,6 +104,7 @@ model User {
   googleCalendarAccount  GoogleCalendarAccount?
   notes                  Note[]
   refreshTokens          RefreshToken[]
+  scheduledMessages      ScheduledMessage[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -181,6 +184,7 @@ model Conversation {
   messages       Message[]
   tasks          Task[]
   notes          Note[]
+  scheduledMessages ScheduledMessage[]
 
   @@index([tenantId])
   @@index([tenantId, status])
@@ -293,6 +297,56 @@ model QuickReply {
   @@unique([tenantId, title])
   @@index([tenantId])
   @@map("quick_replies")
+}
+
+// ------------------------------------------------------------------
+// CHATBOT — regra simples de palavra-chave: se o texto da mensagem
+// inbound contém `keyword` (case-insensitive, substring), responde
+// `replyText` automaticamente. Sem IA, sem árvore de decisão — é
+// deflection de FAQ, não substitui o atendente.
+// ------------------------------------------------------------------
+model ChatbotRule {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  keyword   String
+  replyText String
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@map("chatbot_rules")
+}
+
+// ------------------------------------------------------------------
+// MENSAGEM AGENDADA — o atendente escreve agora, mas o envio de
+// verdade só acontece no tick do scheduler (automation.worker.ts),
+// quando `scheduledFor` já passou. A janela de 24h é checada de novo
+// nesse momento (não só na criação), porque pode ter fechado entre o
+// agendamento e o envio.
+// ------------------------------------------------------------------
+model ScheduledMessage {
+  id             String       @id @default(cuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+
+  text          String
+  scheduledFor  DateTime
+  status        String    @default("pending") // pending | sent | cancelled | failed
+  error         String?
+  createdByUserId String?
+  createdByUser   User?   @relation(fields: [createdByUserId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, status, scheduledFor])
+  @@index([conversationId])
+  @@map("scheduled_messages")
 }
 
 // ------------------------------------------------------------------

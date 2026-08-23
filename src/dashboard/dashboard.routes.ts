@@ -260,4 +260,69 @@ export async function dashboardRoutes(app: FastifyInstance) {
       stageDuration,
     };
   });
+
+  // Mesmos filtros do /dashboard/overview, só que em CSV pra abrir em
+  // planilha — é o "relatório" que dá pra levar pra fora do CRM.
+  app.get("/dashboard/export.csv", async (request, reply) => {
+    const parsed = overviewQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const tenantId = request.auth.tenantId;
+    const to = parsed.data.to ?? new Date();
+    const from = parsed.data.from ?? new Date(to.getTime() - 30 * DAY_MS);
+    const pipelineId = parsed.data.pipelineId;
+
+    const deals = await prisma.deal.findMany({
+      where: { tenantId, createdAt: { gte: from, lte: to }, ...(pipelineId ? { pipelineId } : {}) },
+      include: { contact: true, stage: true, pipeline: true, assignedUser: true },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const header = [
+      "Número",
+      "Título",
+      "Contato",
+      "Telefone",
+      "Pipeline",
+      "Estágio",
+      "Status",
+      "Valor",
+      "Moeda",
+      "Responsável",
+      "Criado em",
+      "Fechado em",
+    ];
+
+    const rows = deals.map((deal) => [
+      deal.number,
+      deal.title,
+      deal.contact?.name ?? "",
+      deal.contact?.phone ?? "",
+      deal.pipeline.name,
+      deal.stage.name,
+      deal.status,
+      deal.valueCents != null ? (deal.valueCents / 100).toFixed(2) : "",
+      deal.currency,
+      deal.assignedUser?.name ?? "",
+      deal.createdAt.toISOString(),
+      (deal.wonAt ?? deal.lostAt)?.toISOString() ?? "",
+    ]);
+
+    const csv = [header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\r\n");
+
+    reply.header("Content-Type", "text/csv; charset=utf-8");
+    reply.header("Content-Disposition", `attachment; filename="negocios-${dayKey(from)}-a-${dayKey(to)}.csv"`);
+    return reply.send(csv);
+  });
+}
+
+function csvEscape(value: unknown): string {
+  const text = String(value ?? "");
+  // Aspas duplas, vírgula ou quebra de linha no valor exigem envolver em
+  // aspas (e escapar aspas internas dobrando) — regra padrão de CSV (RFC 4180).
+  if (/[",\r\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
 }
