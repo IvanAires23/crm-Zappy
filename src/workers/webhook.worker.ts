@@ -131,9 +131,13 @@ async function handleInboundMessage(
     },
   });
 
+  const now = new Date();
   await prisma.conversation.update({
     where: { id: conversation.id },
-    data: { lastMessageAt: new Date() },
+    // lastInboundMessageAt é a base da janela de 24h da Meta — só conta
+    // mensagem do cliente, por isso é separado de lastMessageAt (que
+    // também muda com mensagem nossa, no echo abaixo por exemplo).
+    data: { lastMessageAt: now, lastInboundMessageAt: now },
   });
 
   await prisma.webhookEvent.update({

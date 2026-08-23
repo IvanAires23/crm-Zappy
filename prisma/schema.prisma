@@ -150,6 +150,10 @@ model Conversation {
   // de conversa por atendente). "Não lida" é derivado: lastMessageAt >
   // lastReadAt E a última mensagem é inbound.
   lastReadAt     DateTime?
+  // Janela de 24h da Meta: texto/mídia livre só pode ser enviado até 24h
+  // depois da última mensagem do CLIENTE (não de qualquer mensagem, por
+  // isso não dá pra reusar lastMessageAt). Fora da janela, só template.
+  lastInboundMessageAt DateTime?
   createdAt      DateTime @default(now())
 
   messages       Message[]

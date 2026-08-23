@@ -4,13 +4,36 @@ import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
 import { outboundQueue } from "../queue/queue.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
+import { uploadMedia } from "../whatsapp/client.js";
+
+function whatsappTypeForMime(mimeType: string): "image" | "video" | "audio" | "document" {
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType.startsWith("video/")) return "video";
+  if (mimeType.startsWith("audio/")) return "audio";
+  return "document";
+}
 
 function firstZodMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Dados inválidos";
 }
 
+const WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// Janela de 24h da Meta: texto/mídia livre só é aceito até 24h depois da
+// última mensagem do cliente — passado isso, só template (ver rota de
+// template-messages abaixo). Sem isso o envio falha na Graph API com um
+// erro genérico (code 131047) sem explicação nenhuma pro atendente.
+function isWithinWindow(lastInboundMessageAt: Date | null): boolean {
+  if (!lastInboundMessageAt) return false;
+  return Date.now() - lastInboundMessageAt.getTime() < WINDOW_MS;
+}
+
 const paramsSchema = z.object({ id: z.string().min(1) });
 const sendMessageSchema = z.object({ text: z.string().min(1) });
+const sendTemplateMessageSchema = z.object({
+  templateId: z.string().min(1),
+  variables: z.array(z.string()).optional(),
+});
 const listConversationsQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(30),
@@ -76,6 +99,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
         lastMessagePreview: extractMessagePreview(lastMessage),
         lastMessageDirection: lastMessage?.direction ?? null,
         unread,
+        withinWindow: isWithinWindow(conversation.lastInboundMessageAt),
       };
     });
 
@@ -137,6 +161,11 @@ export async function conversationsRoutes(app: FastifyInstance) {
     if (!conversation) {
       return reply.status(404).send({ error: "Conversa não encontrada" });
     }
+    if (!isWithinWindow(conversation.lastInboundMessageAt)) {
+      return reply.status(409).send({
+        error: "Fora da janela de 24h — envie um template pra reabrir a conversa",
+      });
+    }
 
     const { text } = body.data;
 
@@ -170,6 +199,165 @@ export async function conversationsRoutes(app: FastifyInstance) {
     // Quem enviou já recebe a mensagem na resposta HTTP — isso é pra
     // outros atendentes com a mesma conversa aberta em outra aba/sessão
     // verem em tempo real também.
+    await publishRealtimeEvent({
+      tenantId: request.auth.tenantId,
+      event: "message:new",
+      data: { conversationId: conversation.id, message },
+    });
+
+    return reply.status(201).send(message);
+  });
+
+  // Envia um template aprovado nessa conversa — funciona mesmo fora da
+  // janela de 24h (é assim que a Meta permite reabrir uma conversa parada),
+  // diferente do texto livre da rota acima.
+  app.post("/conversations/:id/template-messages", async (request, reply) => {
+    const params = paramsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: firstZodMessage(params.error) });
+    }
+    const body = sendTemplateMessageSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: firstZodMessage(body.error) });
+    }
+
+    const conversation = await prisma.conversation.findFirst({
+      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      include: { contact: true },
+    });
+    if (!conversation) {
+      return reply.status(404).send({ error: "Conversa não encontrada" });
+    }
+
+    const template = await prisma.template.findFirst({
+      where: { id: body.data.templateId, tenantId: request.auth.tenantId },
+    });
+    if (!template) {
+      return reply.status(404).send({ error: "Template não encontrado" });
+    }
+    if (template.metaStatus !== "approved") {
+      return reply.status(409).send({ error: "Esse template ainda não foi aprovado pela Meta" });
+    }
+
+    const variables = body.data.variables ?? [];
+    // Guarda o texto já substituído localmente pra prévia/histórico — o que
+    // vai pra Meta são os "components" com os parâmetros separados.
+    const renderedText = template.bodyText.replace(
+      /\{\{(\d+)\}\}/g,
+      (match, index) => variables[Number(index) - 1] ?? match
+    );
+    const components =
+      variables.length > 0
+        ? [{ type: "body", parameters: variables.map((text) => ({ type: "text", text })) }]
+        : undefined;
+
+    const message = await prisma.$transaction(async (tx) => {
+      const created = await tx.message.create({
+        data: {
+          tenantId: request.auth.tenantId,
+          conversationId: conversation.id,
+          direction: "outbound",
+          type: "template",
+          content: { templateName: template.name, text: renderedText },
+          status: "pending",
+        },
+      });
+
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: { lastMessageAt: new Date() },
+      });
+
+      return created;
+    });
+
+    await outboundQueue.add("send-message", {
+      tenantId: request.auth.tenantId,
+      messageId: message.id,
+      to: conversation.contact.phone,
+      template: { name: template.name, languageCode: template.language, components },
+    });
+
+    await publishRealtimeEvent({
+      tenantId: request.auth.tenantId,
+      event: "message:new",
+      data: { conversationId: conversation.id, message },
+    });
+
+    return reply.status(201).send(message);
+  });
+
+  // Envia mídia (imagem/áudio/vídeo/documento) nessa conversa — multipart,
+  // um arquivo por request (a legenda, se houver, precisa vir num campo
+  // "caption" ANTES do arquivo no FormData — o parser é um stream e só
+  // enxerga campos que já passaram quando o arquivo é lido). Sujeito à
+  // mesma janela de 24h do texto livre.
+  app.post("/conversations/:id/media-messages", async (request, reply) => {
+    const params = paramsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: firstZodMessage(params.error) });
+    }
+
+    const conversation = await prisma.conversation.findFirst({
+      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      include: { contact: true },
+    });
+    if (!conversation) {
+      return reply.status(404).send({ error: "Conversa não encontrada" });
+    }
+    if (!isWithinWindow(conversation.lastInboundMessageAt)) {
+      return reply.status(409).send({
+        error: "Fora da janela de 24h — envie um template pra reabrir a conversa",
+      });
+    }
+
+    const file = await request.file();
+    if (!file) {
+      return reply.status(400).send({ error: "Nenhum arquivo enviado" });
+    }
+
+    const buffer = await file.toBuffer();
+    const mimeType = file.mimetype;
+    const filename = file.filename;
+    const captionField = (file.fields as Record<string, { value?: unknown }>).caption;
+    const caption = typeof captionField?.value === "string" && captionField.value.length > 0 ? captionField.value : undefined;
+    const type = whatsappTypeForMime(mimeType);
+
+    let uploaded: { id: string };
+    try {
+      uploaded = await uploadMedia(request.auth.tenantId, buffer, mimeType, filename);
+    } catch (err) {
+      request.log.error({ err }, "Falha ao subir mídia pra Meta");
+      return reply.status(502).send({ error: "Não foi possível enviar o arquivo pro WhatsApp" });
+    }
+
+    const message = await prisma.$transaction(async (tx) => {
+      const created = await tx.message.create({
+        data: {
+          tenantId: request.auth.tenantId,
+          conversationId: conversation.id,
+          direction: "outbound",
+          type,
+          content: { id: uploaded.id, mime_type: mimeType, filename, caption: caption ?? null },
+          status: "pending",
+        },
+      });
+
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: { lastMessageAt: new Date() },
+      });
+
+      return created;
+    });
+
+    await outboundQueue.add("send-message", {
+      tenantId: request.auth.tenantId,
+      messageId: message.id,
+      to: conversation.contact.phone,
+      media: { type, id: uploaded.id, caption, filename },
+    });
+
     await publishRealtimeEvent({
       tenantId: request.auth.tenantId,
       event: "message:new",

@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import rawBody from "fastify-raw-body";
 import { env } from "./config/env.js";
 import { initSentry, Sentry } from "./config/sentry.js";
@@ -22,6 +23,7 @@ import { dashboardRoutes } from "./dashboard/dashboard.routes.js";
 import { googleCalendarRoutes } from "./integrations/googleCalendar/googleCalendar.routes.js";
 import { notesRoutes } from "./notes/notes.routes.js";
 import { quickRepliesRoutes } from "./quickReplies/quickReplies.routes.js";
+import { mediaRoutes } from "./media/media.routes.js";
 import { setupRealtime } from "./realtime/socket.js";
 
 initSentry();
@@ -62,6 +64,12 @@ app.setErrorHandler((error, request, reply) => {
 async function main() {
   await app.register(cors, { origin: true });
 
+  // Upload de mídia (imagem/áudio/vídeo/documento) pro envio em conversas —
+  // limite de 16MB, o mesmo teto que a própria Meta aplica pra mídia.
+  await app.register(multipart, {
+    limits: { fileSize: 16 * 1024 * 1024 },
+  });
+
   // Necessário pra validar a assinatura HMAC do webhook com o corpo cru
   await app.register(rawBody, {
     field: "rawBody",
@@ -89,6 +97,7 @@ async function main() {
   await app.register(googleCalendarRoutes);
   await app.register(notesRoutes);
   await app.register(quickRepliesRoutes);
+  await app.register(mediaRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 

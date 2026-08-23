@@ -1,7 +1,7 @@
 import { Worker, type Job } from "bullmq";
 import { connection } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
-import { sendTextMessage, sendTemplateMessage } from "../whatsapp/client.js";
+import { sendTextMessage, sendTemplateMessage, sendMediaMessage } from "../whatsapp/client.js";
 import { initSentry, Sentry } from "../config/sentry.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import pino from "pino";
@@ -16,6 +16,7 @@ interface OutboundJobData {
   to: string;
   text?: string; // envio de texto livre (conversa individual)
   template?: { name: string; languageCode: string; components?: unknown[] }; // envio de template (disparo em massa)
+  media?: { type: "image" | "video" | "audio" | "document"; id: string; caption?: string; filename?: string };
   broadcastRecipientId?: string; // presente só em jobs de disparo em massa
 }
 
@@ -41,12 +42,14 @@ async function updateBroadcastProgress(broadcastRecipientId: string, outcome: "s
 const worker = new Worker(
   "whatsapp-outbound-messages",
   async (job: Job<OutboundJobData>) => {
-    const { tenantId, messageId, to, text, template, broadcastRecipientId } = job.data;
+    const { tenantId, messageId, to, text, template, media, broadcastRecipientId } = job.data;
 
     try {
-      const result = template
-        ? await sendTemplateMessage(tenantId, to, template.name, template.languageCode, template.components)
-        : await sendTextMessage(tenantId, to, text ?? "");
+      const result = media
+        ? await sendMediaMessage(tenantId, to, media.type, media.id, { caption: media.caption, filename: media.filename })
+        : template
+          ? await sendTemplateMessage(tenantId, to, template.name, template.languageCode, template.components)
+          : await sendTextMessage(tenantId, to, text ?? "");
       const whatsappMessageId = result?.messages?.[0]?.id;
 
       const sentMessage = await prisma.message.update({
