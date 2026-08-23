@@ -24,6 +24,7 @@ import { googleCalendarRoutes } from "./integrations/googleCalendar/googleCalend
 import { notesRoutes } from "./notes/notes.routes.js";
 import { quickRepliesRoutes } from "./quickReplies/quickReplies.routes.js";
 import { mediaRoutes } from "./media/media.routes.js";
+import { usersRoutes } from "./users/users.routes.js";
 import { setupRealtime } from "./realtime/socket.js";
 
 initSentry();
@@ -98,6 +99,7 @@ async function main() {
   await app.register(notesRoutes);
   await app.register(quickRepliesRoutes);
   await app.register(mediaRoutes);
+  await app.register(usersRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 

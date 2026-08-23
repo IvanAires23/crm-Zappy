@@ -29,6 +29,17 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
   }
 }
 
+// Restringe uma rota a papéis específicos — precisa vir DEPOIS de
+// authenticate no preHandler (usa request.auth.role). Primeiro uso real:
+// gestão de usuários (só admin cria/edita/desativa atendente).
+export function requireRole(...roles: string[]) {
+  return async function checkRole(request: FastifyRequest, reply: FastifyReply) {
+    if (!roles.includes(request.auth.role)) {
+      return reply.status(403).send({ error: "Sem permissão pra essa ação" });
+    }
+  };
+}
+
 // Variante pra endpoints carregados direto por tag <img>/<audio>/<video> —
 // esses elementos não têm como mandar um header Authorization, então
 // aceitamos o token também via querystring (?token=...) além do header.

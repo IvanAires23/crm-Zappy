@@ -89,6 +89,9 @@ model User {
   email        String
   passwordHash String
   role         String   @default("agent") // admin | agent
+  // Desativar em vez de excluir — preserva o histórico de notas/tarefas/
+  // conversas já atribuídas a esse usuário. Login rejeita active=false.
+  active       Boolean  @default(true)
 
   createdAt    DateTime @default(now())
 
@@ -146,9 +149,10 @@ model Conversation {
   assignedUser   User?    @relation("AssignedAgent", fields: [assignedUserId], references: [id])
 
   lastMessageAt  DateTime @default(now())
-  // Marcador único de leitura (não por usuário — ainda não há atribuição
-  // de conversa por atendente). "Não lida" é derivado: lastMessageAt >
-  // lastReadAt E a última mensagem é inbound.
+  // Marcador único de leitura (não por usuário — atribuição de conversa
+  // não afeta quem vê o quê, é só sobre quem é responsável por responder).
+  // "Não lida" é derivado: lastMessageAt > lastReadAt E a última mensagem
+  // é inbound.
   lastReadAt     DateTime?
   // Janela de 24h da Meta: texto/mídia livre só pode ser enviado até 24h
   // depois da última mensagem do CLIENTE (não de qualquer mensagem, por
@@ -163,6 +167,7 @@ model Conversation {
   @@index([tenantId])
   @@index([tenantId, status])
   @@index([tenantId, lastMessageAt]) // ordenação da lista de conversas
+  @@index([tenantId, assignedUserId]) // filtro "minhas conversas" / "sem atendente"
   @@map("conversations")
 }
 

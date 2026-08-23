@@ -37,7 +37,11 @@ const sendTemplateMessageSchema = z.object({
 const listConversationsQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(30),
+  // "me" = minhas conversas; "unassigned" = sem atendente; qualquer outro
+  // valor é tratado como um userId específico (transferência/supervisão).
+  assignedUserId: z.string().optional(),
 });
+const assignConversationSchema = z.object({ userId: z.string().min(1).nullable() });
 const listMessagesQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -72,12 +76,22 @@ export async function conversationsRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: firstZodMessage(parsed.error) });
     }
-    const { cursor, limit } = parsed.data;
+    const { cursor, limit, assignedUserId } = parsed.data;
+
+    const assignedFilter =
+      assignedUserId === "me"
+        ? { assignedUserId: request.auth.sub }
+        : assignedUserId === "unassigned"
+          ? { assignedUserId: null }
+          : assignedUserId
+            ? { assignedUserId }
+            : {};
 
     const conversations = await prisma.conversation.findMany({
-      where: { tenantId: request.auth.tenantId },
+      where: { tenantId: request.auth.tenantId, ...assignedFilter },
       include: {
         contact: true,
+        assignedUser: { select: { id: true, name: true } },
         messages: { orderBy: { createdAt: "desc" }, take: 1 },
       },
       orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
@@ -368,8 +382,9 @@ export async function conversationsRoutes(app: FastifyInstance) {
   });
 
   // Marca a conversa como lida — "não lida" é derivado no GET /conversations
-  // (última mensagem inbound mais recente que lastReadAt), não há
-  // contagem por usuário ainda (ver CLAUDE.md, lacuna de atribuição).
+  // (última mensagem inbound mais recente que lastReadAt). É um marcador
+  // único por conversa, não por usuário: qualquer atendente que abrir já
+  // limpa o "não lida" pra equipe toda, independente de quem é o atribuído.
   app.post("/conversations/:id/read", async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     if (!params.success) {
@@ -395,5 +410,49 @@ export async function conversationsRoutes(app: FastifyInstance) {
     });
 
     return reply.send({ lastReadAt: updated.lastReadAt });
+  });
+
+  // Atribui/transfere/desatribui uma conversa — qualquer atendente pode
+  // (não é admin-only: é assim que o time se organiza no dia a dia,
+  // pegando conversas pra si ou passando pra outro colega).
+  app.patch("/conversations/:id/assign", async (request, reply) => {
+    const params = paramsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: firstZodMessage(params.error) });
+    }
+    const body = assignConversationSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: firstZodMessage(body.error) });
+    }
+
+    const conversation = await prisma.conversation.findFirst({
+      where: { id: params.data.id, tenantId: request.auth.tenantId },
+    });
+    if (!conversation) {
+      return reply.status(404).send({ error: "Conversa não encontrada" });
+    }
+
+    if (body.data.userId) {
+      const assignee = await prisma.user.findFirst({
+        where: { id: body.data.userId, tenantId: request.auth.tenantId, active: true },
+      });
+      if (!assignee) {
+        return reply.status(404).send({ error: "Usuário não encontrado" });
+      }
+    }
+
+    const updated = await prisma.conversation.update({
+      where: { id: conversation.id },
+      data: { assignedUserId: body.data.userId },
+      include: { assignedUser: { select: { id: true, name: true } } },
+    });
+
+    await publishRealtimeEvent({
+      tenantId: request.auth.tenantId,
+      event: "conversation:assigned",
+      data: { conversationId: conversation.id, assignedUserId: updated.assignedUserId, assignedUser: updated.assignedUser },
+    });
+
+    return reply.send({ assignedUserId: updated.assignedUserId, assignedUser: updated.assignedUser });
   });
 }

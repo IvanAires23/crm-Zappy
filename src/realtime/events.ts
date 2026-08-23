@@ -3,6 +3,6 @@
 // entrou no handshake. Ver src/realtime/bus.ts e src/realtime/socket.ts.
 export interface RealtimeEnvelope {
   tenantId: string;
-  event: "message:new" | "message:status" | "conversation:read";
+  event: "message:new" | "message:status" | "conversation:read" | "conversation:assigned";
   data: unknown;
 }
