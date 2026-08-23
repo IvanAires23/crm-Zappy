@@ -1,4 +1,4 @@
-import makeWASocket, { DisconnectReason, type WASocket } from "@whiskeysockets/baileys";
+import makeWASocket, { DisconnectReason, normalizeMessageContent, type WASocket } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 import { prisma } from "../db/prisma.js";
@@ -55,11 +55,16 @@ async function findOrCreateOpenConversation(tenantId: string, contactId: string)
 
 // Extrai um texto simples do payload de mensagem do Baileys — cobre os dois
 // formatos mais comuns (texto simples e texto com resposta/formatação).
-// Mídia (imagem/áudio/vídeo/documento) fica fora do escopo desta primeira
-// versão da API não oficial; chega como "[tipo não suportado]" no histórico
-// em vez de quebrar o processamento.
+// normalizeMessageContent desembrulha primeiro mensagem efêmera/"visualizar
+// uma vez"/editada etc — sem isso, um texto normal mandado com "mensagens
+// temporárias" ligadas no WhatsApp do cliente chegava como "[tipo não
+// suportado]" mesmo sendo só texto puro.
+// Mídia de verdade (imagem/áudio/vídeo/documento) segue fora do escopo desta
+// primeira versão da API não oficial; chega como "[tipo não suportado]" no
+// histórico em vez de quebrar o processamento.
 function extractText(message: any): string | undefined {
-  return message?.conversation ?? message?.extendedTextMessage?.text;
+  const content = normalizeMessageContent(message);
+  return content?.conversation ?? content?.extendedTextMessage?.text ?? undefined;
 }
 
 async function ingestIncoming(tenantId: string, msg: any) {
@@ -68,7 +73,14 @@ async function ingestIncoming(tenantId: string, msg: any) {
   // 1:1 com o cliente) — nem vale criar Contact/Conversation pra eles.
   if (!remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast") return;
 
-  const phone = jidToPhone(remoteJid);
+  // WhatsApp vem migrando contatos pra um "LID" (@lid) em vez do número de
+  // telefone de verdade (@s.whatsapp.net) por privacidade — principalmente
+  // pra quem esconde o número de contas comerciais. Quando isso acontece, o
+  // Baileys manda o par telefone/LID em remoteJidAlt; sem usar ele aqui, a
+  // mesma pessoa vira um Contact novo (com o LID no lugar do telefone) toda
+  // vez que a Meta decide endereçar a conversa como LID.
+  const phoneJid = remoteJid.endsWith("@lid") && msg.key?.remoteJidAlt ? msg.key.remoteJidAlt : remoteJid;
+  const phone = jidToPhone(phoneJid);
   const text = extractText(msg.message);
   const direction = msg.key.fromMe ? "outbound" : "inbound";
 
@@ -207,13 +219,36 @@ async function logoutSession(tenantId: string): Promise<void> {
 // livre por enquanto. Diferente da Cloud API, aqui não existe "janela de
 // 24h" nem aprovação de template: é WhatsApp Web de verdade, então o
 // comportamento é o mesmo que mandar pelo celular.
+async function resolveJidToSend(sock: WASocket, toPhone: string): Promise<string> {
+  // Não dá pra sempre montar "<telefone>@s.whatsapp.net" na mão: números
+  // migrados pra LID (ver comentário em ingestIncoming) só recebem de
+  // verdade no JID canônico que o próprio WhatsApp devolve aqui — mandar
+  // pro JID "normal" nesse caso não dá erro nenhum (o Baileys aceita o
+  // envio de boa), só que a mensagem nunca chega no aparelho do cliente.
+  try {
+    const [match] = (await sock.onWhatsApp(toPhone)) ?? [];
+    if (match) {
+      if (!match.exists) {
+        throw new Error(`Número ${toPhone} não tem WhatsApp`);
+      }
+      return match.jid;
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("não tem WhatsApp")) throw err;
+    // onWhatsApp em si falhando (rede, timeout) não deveria travar o envio —
+    // cai pro JID "normal" como antes, best-effort.
+  }
+  return phoneToJid(toPhone);
+}
+
 async function sendText(tenantId: string, toPhone: string, text: string): Promise<{ id: string | null }> {
   const sock = sockets.get(tenantId);
   if (!sock) {
     throw new Error(`Tenant ${tenantId} não tem sessão Baileys ativa (desconectado ou nunca conectou)`);
   }
 
-  const result = await sock.sendMessage(phoneToJid(toPhone), { text });
+  const jid = await resolveJidToSend(sock, toPhone);
+  const result = await sock.sendMessage(jid, { text });
   return { id: result?.key?.id ?? null };
 }
 
