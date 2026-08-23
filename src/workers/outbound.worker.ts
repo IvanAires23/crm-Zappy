@@ -3,6 +3,7 @@ import { connection } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
 import { sendTextMessage, sendTemplateMessage } from "../whatsapp/client.js";
 import { initSentry, Sentry } from "../config/sentry.js";
+import { publishRealtimeEvent } from "../realtime/bus.js";
 import pino from "pino";
 
 initSentry();
@@ -48,12 +49,18 @@ const worker = new Worker(
         : await sendTextMessage(tenantId, to, text ?? "");
       const whatsappMessageId = result?.messages?.[0]?.id;
 
-      await prisma.message.update({
+      const sentMessage = await prisma.message.update({
         where: { id: messageId },
         data: {
           status: "sent",
           whatsappMessageId, // o status final (delivered/read) chega depois via webhook
         },
+      });
+
+      await publishRealtimeEvent({
+        tenantId,
+        event: "message:status",
+        data: { conversationId: sentMessage.conversationId, messageId: sentMessage.id, status: sentMessage.status },
       });
 
       if (broadcastRecipientId) {
@@ -77,9 +84,15 @@ const worker = new Worker(
         throw err;
       }
 
-      await prisma.message.update({
+      const failedMessage = await prisma.message.update({
         where: { id: messageId },
         data: { status: "failed" },
+      });
+
+      await publishRealtimeEvent({
+        tenantId,
+        event: "message:status",
+        data: { conversationId: failedMessage.conversationId, messageId: failedMessage.id, status: failedMessage.status },
       });
 
       if (broadcastRecipientId) {

@@ -146,6 +146,10 @@ model Conversation {
   assignedUser   User?    @relation("AssignedAgent", fields: [assignedUserId], references: [id])
 
   lastMessageAt  DateTime @default(now())
+  // Marcador único de leitura (não por usuário — ainda não há atribuição
+  // de conversa por atendente). "Não lida" é derivado: lastMessageAt >
+  // lastReadAt E a última mensagem é inbound.
+  lastReadAt     DateTime?
   createdAt      DateTime @default(now())
 
   messages       Message[]
@@ -154,6 +158,7 @@ model Conversation {
 
   @@index([tenantId])
   @@index([tenantId, status])
+  @@index([tenantId, lastMessageAt]) // ordenação da lista de conversas
   @@map("conversations")
 }
 
@@ -214,6 +219,7 @@ model Message {
 
   @@index([tenantId])
   @@index([conversationId])
+  @@index([conversationId, createdAt]) // paginação por cursor do histórico
   @@map("messages")
 }
 

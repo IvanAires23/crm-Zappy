@@ -22,6 +22,7 @@ import { dashboardRoutes } from "./dashboard/dashboard.routes.js";
 import { googleCalendarRoutes } from "./integrations/googleCalendar/googleCalendar.routes.js";
 import { notesRoutes } from "./notes/notes.routes.js";
 import { quickRepliesRoutes } from "./quickReplies/quickReplies.routes.js";
+import { setupRealtime } from "./realtime/socket.js";
 
 initSentry();
 
@@ -91,7 +92,10 @@ async function main() {
 
   app.get("/health", async () => ({ status: "ok" }));
 
+  // Anexa o Socket.io no HTTP server cru do Fastify — precisa vir depois
+  // do listen() pra app.server já estar de fato escutando na porta.
   await app.listen({ port: env.PORT, host: "0.0.0.0" });
+  setupRealtime(app.server);
 }
 
 main().catch((err) => {
