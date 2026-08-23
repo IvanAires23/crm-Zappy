@@ -1,7 +1,10 @@
 import { Worker, type Job } from "bullmq";
 import { connection } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
+import { initSentry, Sentry } from "../config/sentry.js";
 import pino from "pino";
+
+initSentry();
 
 const logger = pino({ transport: { target: "pino-pretty" } });
 
@@ -305,7 +308,19 @@ async function handleHistorySync(tenantId: string, phoneNumberId: string, histor
 }
 
 worker.on("failed", (job, err) => {
+  Sentry.captureException(err, { extra: { jobId: job?.id, queue: "whatsapp-webhook-events" } });
   logger.error({ jobId: job?.id, err }, "Falha ao processar evento de webhook — vai pra retry/DLQ");
+});
+
+process.on("uncaughtException", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "uncaughtException no worker de webhook");
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "unhandledRejection no worker de webhook");
+  process.exit(1);
 });
 
 logger.info("Worker de webhook iniciado");

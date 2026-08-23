@@ -22,6 +22,11 @@ const envSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().optional(),
   FRONTEND_URL: z.string().default("http://localhost:5173"),
+
+  // Captura de erro em produção — opcional: sem ela, o Sentry simplesmente
+  // não é inicializado (ver src/config/sentry.ts).
+  SENTRY_DSN: z.string().optional(),
+  SENTRY_ENVIRONMENT: z.string().default("production"),
 });
 
 const parsed = envSchema.safeParse(process.env);

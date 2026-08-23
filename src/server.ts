@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import rawBody from "fastify-raw-body";
 import { env } from "./config/env.js";
+import { initSentry, Sentry } from "./config/sentry.js";
 import { webhookRoutes } from "./webhook/webhook.routes.js";
 import { onboardingRoutes } from "./onboarding/onboarding.routes.js";
 import { authRoutes } from "./auth/auth.routes.js";
@@ -22,10 +23,39 @@ import { googleCalendarRoutes } from "./integrations/googleCalendar/googleCalend
 import { notesRoutes } from "./notes/notes.routes.js";
 import { quickRepliesRoutes } from "./quickReplies/quickReplies.routes.js";
 
+initSentry();
+
 const app = Fastify({
   logger: {
     transport: { target: "pino-pretty" },
   },
+});
+
+// Exceção fora de qualquer handler (ex: erro num setInterval, num listener
+// de fila) derrubaria o processo silenciosamente antes disso existir.
+process.on("uncaughtException", (err) => {
+  Sentry.captureException(err);
+  app.log.error(err, "uncaughtException");
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  Sentry.captureException(err);
+  app.log.error(err, "unhandledRejection");
+  process.exit(1);
+});
+
+// Captura qualquer erro que escape de uma rota (ex: o Prisma reclamando de
+// coluna/tabela ausente) antes de virar só um 500 genérico no log — sem
+// isso, um incidente como o de 22/08 só é percebido quando alguém relata.
+app.setErrorHandler((error, request, reply) => {
+  Sentry.captureException(error, { extra: { url: request.url, method: request.method } });
+  request.log.error(error);
+  const statusCode = error.statusCode ?? 500;
+  reply.status(statusCode).send({
+    statusCode,
+    error: statusCode === 500 ? "Internal Server Error" : error.name,
+    message: error.message,
+  });
 });
 
 async function main() {

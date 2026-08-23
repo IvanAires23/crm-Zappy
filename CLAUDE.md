@@ -123,9 +123,13 @@ docker service update --force crm_crm_worker_automation
   `node dist/server.js`. Os workers sobem direto com `node dist/workers/*.js`,
   sem repetir o passo de migration (evita DDL concorrente de 4 processos no
   mesmo banco a cada deploy).
-- **`healthcheck`** no serviço `crm_crm_api` bate em `/health` — sem ele o
-  Swarm considerava "saudável" um container travado no meio da migration ou
-  com a API não respondendo de verdade.
+- **`healthcheck`** no serviço `crm_crm_api` bate em `http://127.0.0.1:3000/health`
+  — sem ele o Swarm considerava "saudável" um container travado no meio da
+  migration ou com a API não respondendo de verdade. **Use `127.0.0.1`, nunca
+  `localhost`**: em Alpine, `localhost` pode resolver pra `::1` (IPv6)
+  primeiro, e o server só escuta em IPv4 (`host: "0.0.0.0"`) — isso já
+  matou um container saudável com "unhealthy container" (exit 137) na
+  primeira vez que o healthcheck foi ligado.
 - **`DATABASE_URL` vs `DIRECT_URL` (Supabase)**: `DATABASE_URL` usa o
   *Transaction pooler* (porta 6543) — é o que a app usa em runtime.
   `DIRECT_URL` é usada só por operações de schema (`migrate deploy`,
@@ -174,11 +178,14 @@ artifact — peça pro usuário o link se precisar, ou refaça a auditoria.
 - Janela de 24h da Meta não é tratada (texto livre fora da janela é
   rejeitado pela Meta sem mensagem clara pro atendente).
 - Sem suporte a mídia (imagem/áudio/vídeo/documento) — só texto.
-- ~~Deploy sem migrations versionadas, sem CI, sem healthcheck no Swarm~~ —
-  **feito em 23/08/2026**: CI (typecheck/build/lint/migrations em dia) +
-  healthcheck + migrations versionadas substituindo `db push`. Falta só
-  definir canal de alerta de erro (Sentry/Slack/e-mail — pendente de
-  decisão do usuário).
+- ~~Deploy sem migrations versionadas, sem CI, sem healthcheck no Swarm,
+  sem captura de erro~~ — **Fase 0 concluída em 23/08/2026**: CI
+  (typecheck/build/lint/migrations em dia) + healthcheck (usando
+  `127.0.0.1`, não `localhost` — ver nota abaixo) + migrations versionadas
+  substituindo `db push` + Sentry (`src/config/sentry.ts`, `initSentry()`
+  chamado no server e nos 3 workers; só ativa se `SENTRY_DSN` estiver
+  setada). `app.setErrorHandler` no `server.ts` captura qualquer exceção
+  que escape de uma rota antes de virar um 500 genérico no log.
 
 **P1 — impedem operar em equipe:**
 - Sem cadastro de usuários (só existe login; criar atendente é manual no banco).

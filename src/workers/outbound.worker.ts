@@ -2,7 +2,10 @@ import { Worker, type Job } from "bullmq";
 import { connection } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
 import { sendTextMessage, sendTemplateMessage } from "../whatsapp/client.js";
+import { initSentry, Sentry } from "../config/sentry.js";
 import pino from "pino";
+
+initSentry();
 
 const logger = pino({ transport: { target: "pino-pretty" } });
 
@@ -91,7 +94,19 @@ const worker = new Worker(
 );
 
 worker.on("failed", (job, err) => {
+  Sentry.captureException(err, { extra: { jobId: job?.id, queue: "whatsapp-outbound-messages" } });
   logger.error({ jobId: job?.id, err }, "Job de envio falhou definitivamente");
+});
+
+process.on("uncaughtException", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "uncaughtException no worker de outbound");
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  Sentry.captureException(err);
+  logger.error(err, "unhandledRejection no worker de outbound");
+  process.exit(1);
 });
 
 logger.info("Worker de envio (outbound) iniciado");
