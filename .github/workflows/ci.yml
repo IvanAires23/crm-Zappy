@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Só gera o Prisma Client a partir do schema — não precisa de banco vivo
+      # pra typecheck/build/lint.
+      - run: npx prisma generate
+
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npx oxlint src

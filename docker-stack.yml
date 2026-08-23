@@ -12,6 +12,16 @@ services:
       - .env
     networks:
       - talks_network
+    # Sem isso, o Swarm considera o container "saudável" assim que o
+    # processo sobe — mesmo que o entrypoint tenha travado no meio do
+    # "prisma db push" ou que a API não esteja realmente respondendo.
+    # start_period dá folga pro db push rodar antes de contar falha.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     deploy:
       mode: replicated
       replicas: 1
