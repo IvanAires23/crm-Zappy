@@ -24,8 +24,14 @@ Meta (Cloud API) --webhook--> [Fastify /webhook] --enfileira--> [Redis/BullMQ]
   for Developers (`META_APP_ID`/`META_APP_SECRET`), mas cada um conecta seu
   próprio WABA/número via Embedded Signup. Toda query é filtrada por
   `tenantId` — nunca confie em um recurso sem checar o tenant do request.
+- **Dois providers de WhatsApp** (`TenantWhatsappAccount.provider`):
+  `cloud_api` (oficial, Embedded Signup — fluxo original) e `baileys`
+  (não oficial, WhatsApp Web via QR Code — adicionado em 23/08/2026 pra
+  destravar demo/uso enquanto o App Review da Meta não sai). Ver
+  "API não oficial (Baileys)" mais abaixo pra arquitetura completa.
 - **Filas** (`src/queue/queue.ts`, BullMQ + ioredis): `whatsapp-webhook-events`,
-  `whatsapp-outbound-messages`, `crm-automation-dispatch`, `crm-scheduler-tick`.
+  `whatsapp-outbound-messages`, `crm-automation-dispatch`, `crm-scheduler-tick`,
+  `whatsapp-unofficial-send` (Baileys).
   O endpoint HTTP do webhook só empurra pra fila e responde 200 na hora —
   processamento pesado e idempotência ficam no worker.
 - **Auth**: JWT (`jsonwebtoken`), payload `{ sub, tenantId, role }`, expira em
@@ -73,6 +79,7 @@ npm run dev                  # API em :3000
 npm run worker:dev           # noutro terminal — processa webhooks inbound
 npm run worker:outbound:dev  # noutro terminal — processa envio outbound
 npm run worker:automation:dev
+npm run worker:baileys:dev   # noutro terminal — só necessário pra testar a API não oficial
 ```
 
 Login de teste (seed): `admin@demo.com` / `admin123`.
@@ -115,6 +122,7 @@ docker service update --force crm_crm_api
 docker service update --force crm_crm_worker_webhook
 docker service update --force crm_crm_worker_outbound
 docker service update --force crm_crm_worker_automation
+docker service update --force crm_crm_worker_baileys
 ```
 
 - **`docker-entrypoint.sh`**: só o serviço `crm_crm_api` usa esse comando
@@ -169,6 +177,69 @@ docker service update --force crm_crm_worker_automation
   ```bash
   docker run --rm --env-file .env crm-api:latest npx prisma migrate deploy
   ```
+
+## API não oficial (Baileys)
+
+Adicionada em 23/08/2026 como alternativa ao Embedded Signup oficial —
+conexão via QR Code (WhatsApp Web), sem depender de App Review da Meta.
+`TenantWhatsappAccount.provider` diferencia as duas (`cloud_api` | `baileys`);
+a maior parte das rotas de conversa/mensagem nem sabe qual provider está por
+trás, porque a diferença fica isolada em `src/whatsapp/client.ts`.
+
+```
+[Frontend] --POST /onboarding/whatsapp/unofficial/start--> [API]
+                                                              | publica comando (Redis pub/sub)
+                                                              v
+                                                 [Worker: baileys.worker.ts]
+                                                 segura os sockets Baileys (1 por tenant, em memória)
+                                                              |
+                                        QR code / conectado --+--> [Redis pub/sub "crm-realtime"] --> Socket.io --> Frontend
+                                        mensagem recebida ----+--> grava direto no Postgres (Contact/Conversation/Message)
+
+[whatsapp/client.ts] --sendTextMessage()--> fila "whatsapp-unofficial-send" --> [baileys.worker.ts] --> socket.sendMessage()
+                       (se provider=baileys; usa BullMQ + QueueEvents pra "esperar" o resultado attavés de processo)
+```
+
+- **Por que um worker dedicado, e não dentro da API**: o socket do Baileys
+  precisa ficar vivo (conexão WebSocket persistente com o WhatsApp) e não
+  pode ter mais de uma réplica pro mesmo tenant — por isso
+  `crm_worker_baileys` é sempre `replicas: 1`, igual aos outros workers.
+- **Comandos** (`src/whatsapp/baileysCommands.ts`): a API só publica
+  `{tenantId, action: "start"|"logout"}` num canal Redis separado do de
+  realtime (`whatsapp-baileys-commands`) — quem efetivamente cria/derruba o
+  socket é o worker, escutando esse canal.
+- **Envio**: como o socket só existe no processo do worker, `sendTextMessage`
+  em `client.ts` (chamado de dentro do `outbound.worker.ts`, outro processo)
+  enfileira na fila BullMQ `whatsapp-unofficial-send` e usa
+  `job.waitUntilFinished(queueEvents)` pra esperar o resultado — dá pra
+  tratar como uma chamada `await` normal apesar de atravessar processos.
+  **Só texto por enquanto** — mídia/template ficam de fora do escopo v1.
+- **Persistência das credenciais** (`src/whatsapp/baileysAuthState.ts`):
+  a VPS não tem volume persistente pros containers (recriados a cada
+  deploy — ver "Deploy" acima), então a sessão NÃO pode viver em arquivo
+  local (`useMultiFileAuthState` do próprio Baileys, que é a opção mais
+  comum, perderia a sessão a cada `docker stack deploy`). Em vez disso, o
+  estado inteiro (creds + chaves do protocolo Signal) vai como um único
+  blob JSON criptografado (mesmo `encryptToken`/`decryptToken` do access
+  token da Cloud API) na coluna `TenantWhatsappAccount.baileysAuthState`.
+  Uma leitura no início da sessão, um write (com mutex por tenant) a cada
+  `creds.update`/`keys.set`.
+- **Reconexão automática**: `baileysManager.reconnectAll()` roda na subida
+  do `baileys.worker.ts` e reabre a sessão de todo tenant com
+  `baileysStatus` em `connected`/`connecting`/`qr_pending` — sessões
+  `logged_out` ficam de fora de propósito (credenciais já inválidas,
+  reconectar geraria erro em loop até o usuário escanear um QR novo).
+- **Contato compartilhado entre providers**: mensagens de ambos os
+  providers gravam `Contact.phone` no mesmo formato (dígitos, sem `+`,
+  igual ao `msg.from` que a Cloud API manda), então o mesmo contato aparece
+  unificado na tela de Conversas independente de qual provider o tenant usa.
+- **Limitação conhecida**: um tenant pode acabar com duas linhas em
+  `TenantWhatsappAccount` (uma `cloud_api`, uma `baileys`) se conectar as
+  duas em momentos diferentes — `/onboarding/whatsapp/status` usa
+  `findFirst` e não tem hoje uma UI de "trocar de provider" explícita. Pra
+  uso enquanto o App Review não sai isso não chega a ser problema (o tenant
+  usa só uma), mas vale resolver antes de oferecer as duas como opção
+  permanente lado a lado.
 
 ## Modelos principais (`prisma/schema.prisma`)
 
