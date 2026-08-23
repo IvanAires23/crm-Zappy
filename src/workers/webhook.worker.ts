@@ -1,5 +1,5 @@
 import { Worker, type Job } from "bullmq";
-import { connection } from "../queue/queue.js";
+import { connection, outboundQueue } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
 import { initSentry, Sentry } from "../config/sentry.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
@@ -152,6 +152,57 @@ async function handleInboundMessage(
   });
 
   logger.info({ tenantId, conversationId: conversation.id }, "Mensagem inbound processada");
+
+  await maybeTriggerChatbotReply(tenantId, conversation.id, fromPhone, msg);
+}
+
+// Chatbot simples de palavra-chave: sem IA, sem árvore de decisão — só
+// deflection de FAQ. Só reage a mensagem de texto (mídia não tem o que
+// comparar) e usa a primeira regra ativa cujo keyword aparece no texto
+// (case-insensitive, substring). Sempre responde, mesmo se um atendente
+// já estiver na conversa — não há "pausa automática" ainda.
+async function maybeTriggerChatbotReply(
+  tenantId: string,
+  conversationId: string,
+  toPhone: string,
+  msg: any
+) {
+  if (msg.type !== "text") return;
+  const text: string | undefined = msg.text?.body;
+  if (!text) return;
+
+  const rules = await prisma.chatbotRule.findMany({ where: { tenantId, isActive: true } });
+  const matched = rules.find((rule) => text.toLowerCase().includes(rule.keyword.toLowerCase()));
+  if (!matched) return;
+
+  const reply = await prisma.message.create({
+    data: {
+      tenantId,
+      conversationId,
+      direction: "outbound",
+      type: "text",
+      content: { text: matched.replyText },
+      status: "pending",
+      source: "bot",
+    },
+  });
+
+  await prisma.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date() } });
+
+  await outboundQueue.add("send-message", {
+    tenantId,
+    messageId: reply.id,
+    to: toPhone,
+    text: matched.replyText,
+  });
+
+  await publishRealtimeEvent({
+    tenantId,
+    event: "message:new",
+    data: { conversationId, message: reply },
+  });
+
+  logger.info({ tenantId, conversationId, ruleId: matched.id }, "Resposta automática do chatbot enfileirada");
 }
 
 async function handleStatusUpdate(tenantId: string, phoneNumberId: string, status: any) {

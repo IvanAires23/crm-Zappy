@@ -28,6 +28,7 @@ import { notesRoutes } from "./notes/notes.routes.js";
 import { quickRepliesRoutes } from "./quickReplies/quickReplies.routes.js";
 import { mediaRoutes } from "./media/media.routes.js";
 import { usersRoutes } from "./users/users.routes.js";
+import { chatbotRoutes } from "./chatbot/chatbot.routes.js";
 import { setupRealtime } from "./realtime/socket.js";
 
 initSentry();
@@ -66,7 +67,14 @@ app.setErrorHandler((error, request, reply) => {
 });
 
 async function main() {
-  await app.register(cors, { origin: allowedOrigins });
+  await app.register(cors, {
+    origin: allowedOrigins,
+    // Sem isso, fetch() no browser não enxerga esse header numa resposta
+    // cross-origin (front e API ficam em domínios diferentes) — é o que
+    // o export de CSV usa pra nomear o arquivo baixado (ver
+    // GET /dashboard/export.csv e api.exportDealsCsv no frontend).
+    exposedHeaders: ["Content-Disposition"],
+  });
 
   // crossOriginResourcePolicy precisa ser "cross-origin": o front carrega
   // mídia (imagem/áudio/vídeo) direto de <img>/<audio>/<video> apontando
@@ -118,6 +126,7 @@ async function main() {
   await app.register(quickRepliesRoutes);
   await app.register(mediaRoutes);
   await app.register(usersRoutes);
+  await app.register(chatbotRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 

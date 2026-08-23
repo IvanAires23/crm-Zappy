@@ -5,6 +5,7 @@ import { authenticate } from "../auth/auth.plugin.js";
 import { outboundQueue } from "../queue/queue.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import { uploadMedia } from "../whatsapp/client.js";
+import { isWithinWindow } from "../whatsapp/window.js";
 
 function whatsappTypeForMime(mimeType: string): "image" | "video" | "audio" | "document" {
   if (mimeType.startsWith("image/")) return "image";
@@ -15,17 +16,6 @@ function whatsappTypeForMime(mimeType: string): "image" | "video" | "audio" | "d
 
 function firstZodMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Dados inválidos";
-}
-
-const WINDOW_MS = 24 * 60 * 60 * 1000;
-
-// Janela de 24h da Meta: texto/mídia livre só é aceito até 24h depois da
-// última mensagem do cliente — passado isso, só template (ver rota de
-// template-messages abaixo). Sem isso o envio falha na Graph API com um
-// erro genérico (code 131047) sem explicação nenhuma pro atendente.
-function isWithinWindow(lastInboundMessageAt: Date | null): boolean {
-  if (!lastInboundMessageAt) return false;
-  return Date.now() - lastInboundMessageAt.getTime() < WINDOW_MS;
 }
 
 const paramsSchema = z.object({ id: z.string().min(1) });
@@ -42,6 +32,11 @@ const listConversationsQuerySchema = z.object({
   assignedUserId: z.string().optional(),
 });
 const assignConversationSchema = z.object({ userId: z.string().min(1).nullable() });
+const createScheduledMessageSchema = z.object({
+  text: z.string().min(1, "Mensagem é obrigatória"),
+  scheduledFor: z.coerce.date().refine((d) => d.getTime() > Date.now(), "A data precisa ser no futuro"),
+});
+const scheduledMessageParamsSchema = z.object({ id: z.string().min(1), scheduledMessageId: z.string().min(1) });
 const listMessagesQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -379,6 +374,76 @@ export async function conversationsRoutes(app: FastifyInstance) {
     });
 
     return reply.status(201).send(message);
+  });
+
+  // Agenda uma mensagem de texto pra essa conversa — o envio de verdade
+  // acontece no tick do scheduler (automation.worker.ts), que checa a
+  // janela de 24h de novo no momento do envio (pode ter fechado entre o
+  // agendamento e a hora marcada).
+  app.post("/conversations/:id/scheduled-messages", async (request, reply) => {
+    const params = paramsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: firstZodMessage(params.error) });
+    }
+    const body = createScheduledMessageSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: firstZodMessage(body.error) });
+    }
+
+    const conversation = await prisma.conversation.findFirst({
+      where: { id: params.data.id, tenantId: request.auth.tenantId },
+    });
+    if (!conversation) {
+      return reply.status(404).send({ error: "Conversa não encontrada" });
+    }
+
+    const scheduled = await prisma.scheduledMessage.create({
+      data: {
+        tenantId: request.auth.tenantId,
+        conversationId: conversation.id,
+        text: body.data.text,
+        scheduledFor: body.data.scheduledFor,
+        createdByUserId: request.auth.sub,
+      },
+    });
+
+    return reply.status(201).send(scheduled);
+  });
+
+  // Só as pendentes — enviadas/canceladas/falhadas ficam no histórico da
+  // mensagem de verdade (ou some da lista), não precisa reaparecer aqui.
+  app.get("/conversations/:id/scheduled-messages", async (request, reply) => {
+    const params = paramsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: firstZodMessage(params.error) });
+    }
+
+    const scheduled = await prisma.scheduledMessage.findMany({
+      where: { conversationId: params.data.id, tenantId: request.auth.tenantId, status: "pending" },
+      orderBy: { scheduledFor: "asc" },
+    });
+
+    return reply.send(scheduled);
+  });
+
+  app.delete("/conversations/:id/scheduled-messages/:scheduledMessageId", async (request, reply) => {
+    const params = scheduledMessageParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: firstZodMessage(params.error) });
+    }
+
+    const existing = await prisma.scheduledMessage.findFirst({
+      where: { id: params.data.scheduledMessageId, conversationId: params.data.id, tenantId: request.auth.tenantId },
+    });
+    if (!existing) {
+      return reply.status(404).send({ error: "Mensagem agendada não encontrada" });
+    }
+    if (existing.status !== "pending") {
+      return reply.status(409).send({ error: "Essa mensagem já foi enviada ou cancelada" });
+    }
+
+    await prisma.scheduledMessage.update({ where: { id: existing.id }, data: { status: "cancelled" } });
+    return reply.status(204).send();
   });
 
   // Marca a conversa como lida — "não lida" é derivado no GET /conversations

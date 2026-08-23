@@ -138,6 +138,23 @@ docker service update --force crm_crm_worker_automation
   (`db.<projeto>.supabase.co:5432`) — essa costuma exigir IPv6 e falha com
   `P1001: Can't reach database server` em VPS comuns. Painel Supabase:
   Settings → Database → Connection string → aba "Session pooler".
+- **`env_file` do `docker-stack.yml` só é lido em `docker stack deploy`,
+  não em `docker service update --force`**: esse `--force` só recria a
+  task com o environment que já estava congelado no serviço desde o
+  último `stack deploy` — editar o `.env` e rodar só `--force` não muda
+  nada de verdade (já pegou a gente ao adicionar `FRONTEND_URL`: o CORS
+  continuou bloqueando porque a variável nova nunca chegou no container).
+  Depois de editar o `.env`, sempre rode `docker stack deploy` de novo
+  (não só `--force`) pra recongelar as variáveis.
+- **CORS depende de `FRONTEND_URL` bater exatamente com a URL real do
+  frontend** (com `https://`, sem barra no final) — desde que o CORS
+  deixou de ser `origin: true` (ver Fase 4 do roadmap), um `FRONTEND_URL`
+  errado ou ausente no `.env` de produção derruba o login inteiro sem
+  erro nenhum no backend (o preflight `OPTIONS` simplesmente não recebe o
+  header de volta, e o navegador nunca chega a mandar o `POST`). Pra
+  testar direto, sem depender do navegador:
+  `curl -s -i -X OPTIONS https://api.agenciatalks.online/auth/login -H "Origin: <url-do-front>" -H "Access-Control-Request-Method: POST" | grep -i access-control-allow-origin`
+  — se não vier nada, é isso.
 - **Cuidado com rollback do Swarm**: se o `command:` de um serviço no
   `docker-stack.yml` mudar e o deploy falhar (ex: entrypoint sai com
   código != 0), o Swarm faz rollback **da definição do serviço inteira**,
