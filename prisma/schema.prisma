@@ -34,6 +34,7 @@ model Tenant {
   calendarEvents    CalendarEvent[]
   automationWebhooks AutomationWebhook[]
   automationRules    AutomationRule[]
+  automationWorkflows AutomationWorkflow[]
   broadcasts        Broadcast[]
   dealCustomFieldDefinitions DealCustomFieldDefinition[]
   googleCalendarAccounts     GoogleCalendarAccount[]
@@ -876,4 +877,59 @@ model AutomationRuleRun {
 
   @@index([ruleId])
   @@map("automation_rule_runs")
+}
+
+// ------------------------------------------------------------------
+// FLUXOS DE AUTOMAÇÃO (construtor visual) — evolução das regras acima:
+// vários gatilhos, passos encadeados (ação, espera, condição com ramos)
+// e execução passo a passo que sobrevive a esperas longas. O grafo fica
+// num JSON (`graph`, ver src/automation/workflow.ts) porque é sempre lido
+// e salvo inteiro pelo construtor.
+// ------------------------------------------------------------------
+
+model AutomationWorkflow {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  name         String
+  isActive     Boolean @default(false)
+  // false = um contato com execução em andamento neste fluxo não entra de novo
+  allowReentry Boolean @default(false)
+  triggers     Json    @default("[]") // [{ id, event, filters: [{field, operator, value}] }]
+  graph        Json    @default("{}") // { startNodeId, nodes: { [id]: node } }
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  runs AutomationWorkflowRun[]
+
+  @@index([tenantId])
+  @@map("automation_workflows")
+}
+
+// Uma "inscrição" de um contato/evento no fluxo — guarda onde parou (pra
+// retomar depois de uma espera) e o log de cada passo executado.
+model AutomationWorkflowRun {
+  id         String             @id @default(cuid())
+  workflowId String
+  workflow   AutomationWorkflow @relation(fields: [workflowId], references: [id])
+  tenantId   String
+
+  contactId     String?
+  dealId        String?
+  triggerEvent  String
+  triggerData   Json
+  status        String    @default("running") // running | waiting | completed | failed
+  currentNodeId String?
+  resumeAt      DateTime?
+  steps         Json      @default("[]") // [{ nodeId, type, label, status, at, detail? }]
+  error         String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([workflowId, createdAt])
+  @@index([workflowId, contactId, status])
+  @@map("automation_workflow_runs")
 }

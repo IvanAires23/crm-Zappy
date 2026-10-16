@@ -1,12 +1,14 @@
 import { prisma } from "../db/prisma.js";
 import { automationQueue } from "../queue/queue.js";
 import { matchesConditions } from "./actions.js";
+import { enrollInWorkflows } from "./workflow.js";
 
 // Chamado a partir das rotas (deal mudou de estágio, task venceu, etc.)
 // sempre que algo relevante acontece. Não bloqueia a resposta HTTP — só
 // enfileira: (1) a entrega pra cada webhook de automação inscrito no
-// evento, e (2) a execução de cada regra interna cujo gatilho e condições
-// batem com esse evento.
+// evento, (2) a execução de cada regra interna cujo gatilho e condições
+// batem com esse evento e (3) a inscrição em cada fluxo do construtor
+// visual com um gatilho que bate.
 export async function emitAutomationEvent(
   tenantId: string,
   event: string,
@@ -49,4 +51,6 @@ export async function emitAutomationEvent(
       },
     });
   }
+
+  await enrollInWorkflows(tenantId, event, data);
 }

@@ -8,6 +8,7 @@ import QRCode from "qrcode";
 import pino from "pino";
 import { prisma } from "../db/prisma.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
+import { emitAutomationEvent } from "../automation/emit.js";
 import { usePostgresAuthState } from "./baileysAuthState.js";
 import { clearLastError, clearLatestQr, setLastError, setLatestQr } from "./baileysRuntime.js";
 
@@ -180,6 +181,18 @@ async function ingestIncoming(tenantId: string, msg: any) {
     event: "message:new",
     data: { conversationId: conversation.id, message },
   });
+
+  if (direction === "inbound") {
+    await emitAutomationEvent(tenantId, "message.received", {
+      contactId: contact.id,
+      contactPhone: contact.phone,
+      contactName: contact.name,
+      conversationId: conversation.id,
+      channel: "whatsapp",
+      text: text ?? "",
+      messageType: text ? "text" : "unsupported",
+    });
+  }
 }
 
 async function startSession(tenantId: string): Promise<void> {
