@@ -19,6 +19,7 @@ import { tasksRoutes } from "./tasks/tasks.routes.js";
 import { calendarRoutes } from "./calendar/calendar.routes.js";
 import { automationRoutes } from "./automation/automation.routes.js";
 import { automationRulesRoutes } from "./automation/rules.routes.js";
+import { automationWorkflowsRoutes } from "./automation/workflows.routes.js";
 import { templatesRoutes } from "./templates/templates.routes.js";
 import { broadcastsRoutes } from "./broadcasts/broadcasts.routes.js";
 import { customFieldDefinitionsRoutes } from "./customFields/customFieldDefinitions.routes.js";
@@ -117,6 +118,7 @@ async function main() {
   await app.register(calendarRoutes);
   await app.register(automationRoutes);
   await app.register(automationRulesRoutes);
+  await app.register(automationWorkflowsRoutes);
   await app.register(templatesRoutes);
   await app.register(broadcastsRoutes);
   await app.register(customFieldDefinitionsRoutes);

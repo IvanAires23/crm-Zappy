@@ -3,6 +3,7 @@ import { connection, outboundQueue } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
 import { initSentry, Sentry } from "../config/sentry.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
+import { emitAutomationEvent } from "../automation/emit.js";
 import pino from "pino";
 
 initSentry();
@@ -152,6 +153,16 @@ async function handleInboundMessage(
   });
 
   logger.info({ tenantId, conversationId: conversation.id }, "Mensagem inbound processada");
+
+  await emitAutomationEvent(tenantId, "message.received", {
+    contactId: contact.id,
+    contactPhone: contact.phone,
+    contactName: contact.name,
+    conversationId: conversation.id,
+    channel: "whatsapp",
+    text: msg.type === "text" ? msg.text?.body ?? "" : "",
+    messageType: msg.type,
+  });
 
   await maybeTriggerChatbotReply(tenantId, conversation.id, fromPhone, msg);
 }

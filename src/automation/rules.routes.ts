@@ -4,7 +4,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "../auth/auth.plugin.js";
 
-const actionSchema = z.discriminatedUnion("type", [
+export const actionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("update_deal_status"),
     status: z.enum(["open", "won", "lost"]),
@@ -62,6 +62,11 @@ const updateRuleSchema = z.object({
 // Catálogo estático dos eventos que o CRM emite hoje, pra frontend montar
 // um seletor de gatilho sem precisar adivinhar nome/campos disponíveis.
 const EVENT_CATALOG = [
+  {
+    event: "message.received",
+    description: "Quando o cliente manda uma mensagem no WhatsApp",
+    fields: ["contactId", "contactPhone", "contactName", "conversationId", "channel", "text"],
+  },
   {
     event: "deal.created",
     description: "Quando um novo deal é criado",
