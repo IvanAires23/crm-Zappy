@@ -1,8 +1,9 @@
+import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { prisma } from "../db/prisma.js";
-import { encryptToken } from "../config/crypto.js";
+import { decryptToken, encryptToken } from "../config/crypto.js";
 import { checkCoexistenceStatus, triggerSmbAppDataSync } from "../whatsapp/client.js";
 import { authenticate } from "../auth/auth.plugin.js";
 import { publishBaileysCommand } from "../whatsapp/baileysCommands.js";
@@ -56,6 +57,28 @@ async function resolveWabaIdFromToken(accessToken: string): Promise<string | und
     scopes.find((s) => s.scope === "whatsapp_business_messaging");
 
   return whatsappScope?.target_ids?.[0];
+}
+
+function firstZodMessage(error: z.ZodError): string {
+  const issue = error.issues[0];
+  return issue ? `${issue.message}${issue.path.length ? ` (${issue.path.join(".")})` : ""}` : "Dados inválidos";
+}
+
+// Erros conhecidos do /register — viram mensagem acionável em vez do JSON
+// cru da Meta.
+function describeRegisterError(json: any): string {
+  const code = json?.error?.code;
+  if (code === 133005) {
+    return (
+      "Este número já tem verificação em duas etapas com outro PIN. No WhatsApp Manager, abra o número → " +
+      "Verificação em duas etapas, desative (ou redefina) e conecte de novo."
+    );
+  }
+  if (code === 133016) {
+    return "A Meta bloqueou novas tentativas de registro deste número por 72h (limite de 10 tentativas). Tente depois.";
+  }
+  const detail = json?.error?.error_user_msg ?? json?.error?.message;
+  return `Não foi possível registrar o número na Cloud API do WhatsApp${detail ? `: ${detail}` : ""}`;
 }
 
 export async function onboardingRoutes(app: FastifyInstance) {
@@ -159,7 +182,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
   app.post("/onboarding/whatsapp/complete", async (request, reply) => {
     const parsed = completeSignupSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.flatten() });
+      return reply.status(400).send({ error: firstZodMessage(parsed.error) });
     }
     const tenantId = request.auth.tenantId;
     const { code } = parsed.data;
@@ -217,6 +240,30 @@ export async function onboardingRoutes(app: FastifyInstance) {
     //    Business App do celular) — isso muda os próximos passos.
     const { isOnBizApp, platformType } = await checkCoexistenceStatus(phoneNumberId, accessToken);
 
+    // Sem inscrever o app na WABA do cliente, a Meta nunca manda os
+    // webhooks dela pra nós — o número "conecta", mas mensagem recebida não
+    // chega no CRM. Vale pros dois fluxos (normal e coexistência).
+    const subscribeRes = await graphFetch(`${GRAPH_BASE}/${wabaId}/subscribed_apps`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!subscribeRes.ok) {
+      const subscribeJson = await subscribeRes.json().catch(() => ({}));
+      request.log.error({ subscribeJson, wabaId }, "Falha ao inscrever o app nos webhooks da WABA");
+      return reply.status(400).send({
+        error: `Não foi possível ativar o recebimento de mensagens dessa conta${
+          subscribeJson?.error?.message ? `: ${subscribeJson.error.message}` : ""
+        }`,
+      });
+    }
+
+    // PIN da verificação em duas etapas: reaproveita o que já geramos pra
+    // esse número (re-conexão), senão cria um novo.
+    const existingAccount = await prisma.tenantWhatsappAccount.findUnique({ where: { phoneNumberId } });
+    const twoStepPin = existingAccount?.twoStepPinEncrypted
+      ? decryptToken(existingAccount.twoStepPinEncrypted)
+      : crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
+
     if (isOnBizApp) {
       // Número em coexistência já está registrado — NÃO chamar /register
       // (a Meta rejeita/é desnecessário). Em vez disso, dispara a
@@ -232,7 +279,8 @@ export async function onboardingRoutes(app: FastifyInstance) {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ messaging_product: "whatsapp" }),
+        // A Meta exige o PIN de 6 dígitos — sem ele o registro falha.
+        body: JSON.stringify({ messaging_product: "whatsapp", pin: twoStepPin }),
       });
 
       // O /register falhava em silêncio: a conta era salva como "conectada"
@@ -241,10 +289,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
       if (!registerRes.ok) {
         const registerJson = await registerRes.json().catch(() => ({}));
         request.log.error({ registerJson, phoneNumberId }, "Falha ao registrar o número na Cloud API");
-        return reply.status(400).send({
-          error: "Não foi possível registrar o número na Cloud API do WhatsApp",
-          details: registerJson,
-        });
+        return reply.status(400).send({ error: describeRegisterError(registerJson), details: registerJson });
       }
     }
 
@@ -256,6 +301,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
         wabaId,
         phoneNumberId,
         accessTokenEncrypted: encryptToken(accessToken),
+        twoStepPinEncrypted: isOnBizApp ? null : encryptToken(twoStepPin),
         tokenStatus: "active",
         isCoexistence: isOnBizApp,
         platformType,
@@ -263,6 +309,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
       },
       update: {
         accessTokenEncrypted: encryptToken(accessToken),
+        twoStepPinEncrypted: isOnBizApp ? undefined : encryptToken(twoStepPin),
         tokenStatus: "active",
         isCoexistence: isOnBizApp,
         platformType,

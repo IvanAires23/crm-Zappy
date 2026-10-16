@@ -67,6 +67,10 @@ model TenantWhatsappAccount {
   displayPhoneNumber String?
 
   accessTokenEncrypted String? // token de acesso do tenant, criptografado — só cloud_api
+  // PIN de 6 dígitos da verificação em duas etapas, exigido pela Meta no
+  // /register da Cloud API. Gerado por nós e guardado (criptografado) pra
+  // reusar num re-registro — a Meta exige o mesmo PIN se ele já existir.
+  twoStepPinEncrypted String?
   tokenStatus           String @default("active") // active | revoked | expired
 
   qualityRating     String?  // GREEN | YELLOW | RED
