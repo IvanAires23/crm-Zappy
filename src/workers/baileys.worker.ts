@@ -5,6 +5,7 @@ import { connection } from "../queue/queue.js";
 import { initSentry, Sentry } from "../config/sentry.js";
 import { baileysManager } from "../whatsapp/baileysManager.js";
 import { BAILEYS_COMMANDS_CHANNEL, type BaileysCommand } from "../whatsapp/baileysCommands.js";
+import { beatWorkerHeartbeat } from "../whatsapp/baileysRuntime.js";
 import pino from "pino";
 
 initSentry();
@@ -58,6 +59,15 @@ subscriber.on("message", async (_channel, raw) => {
     logger.error({ command, err }, "Falha ao executar comando de Baileys");
   }
 });
+
+// Sinal de vida lido pela API antes de pedir um QR: sem ele, "Gerar QR
+// Code" com este worker fora do ar publicava o comando no vazio e a tela
+// esperava pra sempre.
+function heartbeat() {
+  beatWorkerHeartbeat().catch((err) => logger.error(err, "Falha ao registrar heartbeat do worker de Baileys"));
+}
+heartbeat();
+setInterval(heartbeat, 15_000);
 
 baileysManager.reconnectAll().catch((err) => {
   Sentry.captureException(err);

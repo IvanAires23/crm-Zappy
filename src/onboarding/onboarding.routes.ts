@@ -6,6 +6,7 @@ import { encryptToken } from "../config/crypto.js";
 import { checkCoexistenceStatus, triggerSmbAppDataSync } from "../whatsapp/client.js";
 import { authenticate } from "../auth/auth.plugin.js";
 import { publishBaileysCommand } from "../whatsapp/baileysCommands.js";
+import { clearLastError, getLastError, getLatestQr, isWorkerOnline } from "../whatsapp/baileysRuntime.js";
 
 const GRAPH_BASE = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}`;
 
@@ -70,6 +71,17 @@ export async function onboardingRoutes(app: FastifyInstance) {
       return reply.send({ connected: false });
     }
 
+    // Só pra API não oficial: QR atual e último erro saem daqui também, pra
+    // tela poder acompanhar por polling sem depender só do WebSocket.
+    const baileys =
+      account.provider === "baileys"
+        ? {
+            qr: account.baileysStatus === "qr_pending" ? await getLatestQr(request.auth.tenantId) : null,
+            lastError: account.baileysStatus === "connected" ? null : await getLastError(request.auth.tenantId),
+            workerOnline: await isWorkerOnline(),
+          }
+        : null;
+
     return reply.send({
       connected: account.provider === "baileys" ? account.baileysStatus === "connected" : true,
       account: {
@@ -82,15 +94,25 @@ export async function onboardingRoutes(app: FastifyInstance) {
         isCoexistence: account.isCoexistence,
         baileysStatus: account.baileysStatus,
       },
+      baileys,
     });
   });
 
   // Inicia (ou reinicia) uma conexão via API não oficial (Baileys/QR Code).
   // Só publica o comando pro worker dedicado (que segura o socket de
   // verdade) e devolve na hora — o QR chega pro front pelo WebSocket
-  // (evento "whatsapp:qr"), não na resposta desta rota.
+  // (evento "whatsapp:qr") e também em GET /status (polling), não na
+  // resposta desta rota.
   app.post("/onboarding/whatsapp/unofficial/start", async (request, reply) => {
     const tenantId = request.auth.tenantId;
+
+    if (!(await isWorkerOnline())) {
+      return reply.status(503).send({
+        error:
+          "O serviço que gera o QR Code (worker de Baileys) não está rodando no servidor. " +
+          "Suba o serviço crm_crm_worker_baileys e tente de novo.",
+      });
+    }
 
     const existing = await prisma.tenantWhatsappAccount.findFirst({
       where: { tenantId, provider: "baileys" },
@@ -99,7 +121,12 @@ export async function onboardingRoutes(app: FastifyInstance) {
     if (existing) {
       await prisma.tenantWhatsappAccount.update({
         where: { id: existing.id },
-        data: { baileysStatus: "connecting" },
+        data: {
+          baileysStatus: "connecting",
+          // Credenciais de uma sessão deslogada pelo celular já não valem:
+          // reaproveitá-las fecha a conexão com 401 antes de emitir QR.
+          ...(existing.baileysStatus === "logged_out" ? { baileysAuthState: null } : {}),
+        },
       });
     } else {
       await prisma.tenantWhatsappAccount.create({
@@ -113,6 +140,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
       });
     }
 
+    await clearLastError(tenantId);
     await publishBaileysCommand({ tenantId, action: "start" });
 
     return reply.status(202).send({ started: true });

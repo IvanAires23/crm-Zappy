@@ -1,9 +1,15 @@
-import makeWASocket, { DisconnectReason, normalizeMessageContent, type WASocket } from "@whiskeysockets/baileys";
+import makeWASocket, {
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  normalizeMessageContent,
+  type WASocket,
+} from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 import { prisma } from "../db/prisma.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import { usePostgresAuthState } from "./baileysAuthState.js";
+import { clearLastError, clearLatestQr, setLastError, setLatestQr } from "./baileysRuntime.js";
 
 const logger = pino({ transport: { target: "pino-pretty" } });
 const baileysLogger = pino({ level: "warn" }); // silencioso — só warn/error do próprio protocolo
@@ -13,6 +19,56 @@ const baileysLogger = pino({ level: "warn" }); // silencioso — só warn/error 
 // restart do worker é feito relendo do banco todo TenantWhatsappAccount
 // com provider=baileys e baileysStatus != logged_out (ver reconnectAll()).
 const sockets = new Map<string, WASocket>();
+
+// Espera antes de reabrir uma sessão que caiu sozinha — sem isso, uma
+// recusa imediata do WhatsApp (ex: 405 de versão desatualizada) vira um
+// loop apertado de reconexão que nunca chega a gerar QR.
+const RECONNECT_DELAY_MS = 5_000;
+
+// Versão do protocolo do WhatsApp Web que o socket anuncia. A que vem
+// embutida no pacote envelhece e o WhatsApp passa a recusar a conexão
+// antes de mandar QR; buscar a atual resolve, com fallback pra embutida
+// se o GitHub estiver fora.
+let cachedVersion: [number, number, number] | undefined;
+async function resolveWaVersion(): Promise<[number, number, number] | undefined> {
+  if (cachedVersion) return cachedVersion;
+  // fetchLatestBaileysVersion nunca lança (cai pra embutida com
+  // isLatest=false), mas também não tem timeout próprio.
+  const result = await Promise.race([
+    fetchLatestBaileysVersion(),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+  ]);
+  if (result?.isLatest) {
+    cachedVersion = result.version as [number, number, number];
+  } else {
+    logger.warn("Não foi possível buscar a versão atual do WhatsApp Web — usando a embutida");
+  }
+  return cachedVersion;
+}
+
+function describeDisconnect(statusCode: number | undefined): string {
+  switch (statusCode) {
+    case DisconnectReason.loggedOut:
+      return "A sessão foi desconectada pelo celular. Gere um QR Code novo.";
+    case DisconnectReason.forbidden:
+      return "O WhatsApp recusou a conexão deste número (403).";
+    case 405:
+      return "O WhatsApp recusou a conexão (405) — normalmente versão do WhatsApp Web desatualizada no servidor.";
+    case DisconnectReason.connectionReplaced:
+      return "Outra sessão do WhatsApp Web assumiu este número.";
+    case DisconnectReason.timedOut:
+      return "O QR Code expirou sem ser escaneado. Gere um novo.";
+    default:
+      return `A conexão com o WhatsApp caiu${statusCode ? ` (código ${statusCode})` : ""}.`;
+  }
+}
+
+async function clearAuthState(accountId: string): Promise<void> {
+  await prisma.tenantWhatsappAccount.update({
+    where: { id: accountId },
+    data: { baileysAuthState: null },
+  });
+}
 
 // JID do WhatsApp é "<telefone>@s.whatsapp.net" (ou "...@lid" em alguns
 // casos novos do multi-device) — guardamos o Contact só com o telefone puro
@@ -130,10 +186,22 @@ async function startSession(tenantId: string): Promise<void> {
   if (sockets.has(tenantId)) return; // já tem uma sessão viva pra esse tenant
 
   const account = await getOrCreateAccount(tenantId);
+  // Credenciais de uma sessão deslogada pelo celular já foram invalidadas
+  // pelo WhatsApp: reaproveitá-las faz a conexão fechar com 401 na hora,
+  // sem nunca emitir QR. (A rota de start também zera, porque ela troca o
+  // status pra "connecting" antes deste worker ler.)
+  if (account.baileysStatus === "logged_out") await clearAuthState(account.id);
   const { state, saveCreds } = await usePostgresAuthState(account.id);
+  const version = await resolveWaVersion();
+
+  // Só true entre o primeiro QR e a conexão abrir — é o que separa "QR
+  // expirou sem ninguém escanear" (não reconecta sozinho) de uma queda de
+  // uma sessão já pareada (reconecta).
+  let awaitingScan = false;
 
   const sock = makeWASocket({
     auth: state,
+    ...(version ? { version } : {}),
     logger: baileysLogger,
     // "CRM WhatsApp" aparece na lista de aparelhos conectados do usuário —
     // ajuda a identificar de onde veio a conexão se ele checar pelo celular.
@@ -148,15 +216,21 @@ async function startSession(tenantId: string): Promise<void> {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      awaitingScan = true;
       const qrDataUrl = await QRCode.toDataURL(qr);
       await prisma.tenantWhatsappAccount.update({
         where: { id: account.id },
         data: { baileysStatus: "qr_pending" },
       });
+      await setLatestQr(tenantId, qrDataUrl);
+      await clearLastError(tenantId);
       await publishRealtimeEvent({ tenantId, event: "whatsapp:qr", data: { qr: qrDataUrl } });
     }
 
     if (connection === "open") {
+      awaitingScan = false;
+      await clearLatestQr(tenantId);
+      await clearLastError(tenantId);
       const displayPhoneNumber = sock.user?.id ? jidToPhone(sock.user.id) : undefined;
       await prisma.tenantWhatsappAccount.update({
         where: { id: account.id },
@@ -169,23 +243,42 @@ async function startSession(tenantId: string): Promise<void> {
     if (connection === "close") {
       sockets.delete(tenantId);
 
-      const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+      const statusCode = (lastDisconnect?.error as any)?.output?.statusCode as number | undefined;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
+      // restartRequired (515) é o passo normal logo depois de escanear o QR
+      const restartRequired = statusCode === DisconnectReason.restartRequired;
+      const qrExpired = awaitingScan && statusCode === DisconnectReason.timedOut;
+
+      await clearLatestQr(tenantId);
+      if (!restartRequired) await setLastError(tenantId, describeDisconnect(statusCode));
 
       await prisma.tenantWhatsappAccount.update({
         where: { id: account.id },
-        data: { baileysStatus: loggedOut ? "logged_out" : "disconnected" },
+        data: {
+          baileysStatus: loggedOut ? "logged_out" : "disconnected",
+          ...(loggedOut ? { baileysAuthState: null } : {}),
+        },
       });
-      await publishRealtimeEvent({ tenantId, event: "whatsapp:disconnected", data: { loggedOut } });
+      await publishRealtimeEvent({ tenantId, event: "whatsapp:disconnected", data: { loggedOut, statusCode } });
 
       if (loggedOut) {
         logger.warn({ tenantId }, "Sessão Baileys deslogada pelo celular — precisa de um QR novo");
+      } else if (qrExpired) {
+        // Ninguém escaneou: não fica gerando QR pra sempre em segundo plano,
+        // o usuário clica em "Gerar QR Code" de novo quando quiser.
+        logger.info({ tenantId }, "QR Code expirou sem ser escaneado");
+      } else if (restartRequired) {
+        await startSession(tenantId);
       } else {
         // Queda de rede/servidor da Meta reinicia sozinha — só logout manual
         // pelo celular exige um QR novo (as chaves antigas já foram
         // invalidadas do lado do WhatsApp).
         logger.warn({ tenantId, statusCode }, "Sessão Baileys caiu, reconectando");
-        await startSession(tenantId);
+        setTimeout(() => {
+          startSession(tenantId).catch((err) =>
+            logger.error({ tenantId, err }, "Falha ao reconectar sessão Baileys")
+          );
+        }, RECONNECT_DELAY_MS);
       }
     }
   });
