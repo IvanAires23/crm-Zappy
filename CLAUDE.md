@@ -252,6 +252,31 @@ chaveado pelo id da definição), `Tag`/`ContactTag`, `Task`, `CalendarEvent`,
 `GoogleCalendarAccount`, `AutomationWebhook`/`AutomationRule`/`AutomationRuleRun`/
 `AutomationDelivery`.
 
+## Fluxos de automação (construtor visual)
+
+`AutomationWorkflow` + `AutomationWorkflowRun`, motor em
+`src/automation/workflow.ts`, rotas em `workflows.routes.ts`. Convivem com
+as regras simples (`AutomationRule`), que continuam funcionando.
+
+- **Grafo é uma árvore em JSON** (`graph: { startNodeId, nodes }`): nó
+  `action`, `wait` ou `condition` (caminhos + `elseNext` = "Nenhuma"), cada
+  um apontando pro próximo por id. Ramos nunca se juntam — a rota de PATCH
+  recusa nó solto, ciclo, passo inexistente ou nó com dois pais.
+- **Gatilhos** (`triggers`): vários por fluxo, cada um com evento + filtros
+  (`{field, operator, value}`) avaliados sobre um contexto
+  (`contact.tags`, `message.text`, `deal.id`, `trigger.*`...) remontado a
+  cada passo por `buildContext()`.
+- **Execução**: `emitAutomationEvent` → `enrollInWorkflows` cria o run e
+  enfileira `workflow-step` (fila `crm-automation-dispatch`, `attempts: 1`
+  pra não repetir mensagem/oportunidade). Espera = job atrasado do BullMQ;
+  o run guarda `currentNodeId`/`resumeAt` e o log em `steps`.
+- **Reentrada**: por padrão um contato com run `running`/`waiting` no fluxo
+  não entra de novo (`allowReentry`).
+- Evento `message.received` ("cliente respondeu") é emitido nos dois
+  providers (webhook da Cloud API e `baileysManager.ingestIncoming`).
+- Ação de etiqueta feita por fluxo **não** emite `contact.tag_added` (evita
+  loop de fluxo disparado por etiqueta).
+
 ## Lacunas conhecidas / roadmap
 
 Auditoria completa feita em 22-23/08/2026, comparando com CRMs consolidados
