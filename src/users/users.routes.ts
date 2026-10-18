@@ -125,6 +125,12 @@ export async function usersRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Usuário não encontrado" });
     }
 
+    // Usuários de agência são geridos na tela da agência — o admin de uma
+    // conta não pode rebaixar nem desativar o master.
+    if (existing.agencyRole && request.auth.agencyRole !== "agency_admin") {
+      return reply.status(403).send({ error: "Esse usuário é da agência — só o administrador da agência pode alterá-lo" });
+    }
+
     const { name, role, password, permissions } = body.data;
 
     // A conta nunca pode ficar sem um admin ativo pra gerenciar a equipe.
@@ -182,6 +188,12 @@ export async function usersRoutes(app: FastifyInstance) {
     });
     if (!existing) {
       return reply.status(404).send({ error: "Usuário não encontrado" });
+    }
+
+    // Usuários de agência são geridos na tela da agência — o admin de uma
+    // conta não pode rebaixar nem desativar o master.
+    if (existing.agencyRole && request.auth.agencyRole !== "agency_admin") {
+      return reply.status(403).send({ error: "Esse usuário é da agência — só o administrador da agência pode alterá-lo" });
     }
 
     if (!body.data.active && existing.role === "admin" && (await countOtherActiveAdmins(existing.tenantId, existing.id)) === 0) {

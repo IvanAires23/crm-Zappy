@@ -18,6 +18,9 @@ model Tenant {
   slug      String   @unique
   plan      String   @default("trial")
   status    String   @default("active") // active | suspended | canceled
+  // Módulos que a agência desligou nesta conta (chaves de permissão) —
+  // somem pra todo usuário da conta, nem o admin dela consegue religar.
+  disabledPermissions Json @default("[]")
   createdAt DateTime @default(now())
 
   users             User[]
@@ -42,6 +45,7 @@ model Tenant {
   quickReplies               QuickReply[]
   chatbotRules               ChatbotRule[]
   scheduledMessages          ScheduledMessage[]
+  agencyAccess               AgencyUserAccess[]
 
   @@map("tenants")
 }
@@ -116,6 +120,9 @@ model User {
   // Desativar em vez de excluir — preserva o histórico de notas/tarefas/
   // conversas já atribuídas a esse usuário. Login rejeita active=false.
   active       Boolean  @default(true)
+  // Camada de agência (ver src/agency): agency_admin acessa todas as contas,
+  // agency_user só as liberadas em AgencyUserAccess. null = usuário comum.
+  agencyRole   String?
 
   createdAt    DateTime @default(now())
 
@@ -127,6 +134,7 @@ model User {
   notes                  Note[]
   refreshTokens          RefreshToken[]
   scheduledMessages      ScheduledMessage[]
+  agencyAccess           AgencyUserAccess[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -144,10 +152,27 @@ model RefreshToken {
   tokenHash String    @unique
   expiresAt DateTime
   revokedAt DateTime?
+  // Conta em que o usuário de agência "entrou" — o refresh mantém ele lá
+  // em vez de devolver pra conta de origem a cada renovação.
+  actingTenantId String?
   createdAt DateTime  @default(now())
 
   @@index([userId])
   @@map("refresh_tokens")
+}
+
+// Contas liberadas pra um agency_user (agency_admin vê todas sem precisar disso).
+model AgencyUserAccess {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, tenantId])
+  @@index([tenantId])
+  @@map("agency_user_access")
 }
 
 // ------------------------------------------------------------------

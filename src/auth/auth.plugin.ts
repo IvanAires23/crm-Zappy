@@ -2,7 +2,7 @@ import type { FastifyRequest, FastifyReply } from "fastify";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 import { prisma } from "../db/prisma.js";
-import { resolvePermissions } from "./permissions.js";
+import { disabledPermissionList, resolvePermissions } from "./permissions.js";
 
 export interface AuthPayload {
   sub: string;
@@ -10,8 +10,14 @@ export interface AuthPayload {
   role: string;
 }
 
+export type AgencyRole = "agency_admin" | "agency_user";
+
 export interface RequestAuth extends AuthPayload {
   permissions: Set<string>;
+  agencyRole: AgencyRole | null;
+  homeTenantId: string;
+  // true quando um usuário de agência está operando a conta de um cliente.
+  acting: boolean;
 }
 
 declare module "fastify" {
@@ -20,9 +26,63 @@ declare module "fastify" {
   }
 }
 
+export function normalizeAgencyRole(value: string | null | undefined): AgencyRole | null {
+  return value === "agency_admin" || value === "agency_user" ? value : null;
+}
+
+// Monta a sessão de um usuário dentro de uma conta (tenant). Usado a cada
+// request e também no login/refresh/entrar-na-conta, pra que todos
+// apliquem exatamente as mesmas regras:
+// - conta de origem: papel + exceções do usuário, menos os módulos que a
+//   agência desligou na conta (agência não sofre esse corte);
+// - outra conta: só usuário de agência (agency_admin em qualquer uma,
+//   agency_user nas liberadas pra ele), sempre com os padrões de admin.
+export async function resolveSession(
+  userId: string,
+  tenantId: string
+): Promise<{ ok: true; auth: RequestAuth } | { ok: false; error: string }> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { tenantId: true, role: true, permissions: true, active: true, agencyRole: true },
+  });
+  if (!user || !user.active) {
+    return { ok: false, error: "Usuário desativado ou sem acesso a esta conta" };
+  }
+  const agencyRole = normalizeAgencyRole(user.agencyRole);
+  const acting = tenantId !== user.tenantId;
+
+  if (acting) {
+    const allowed =
+      agencyRole === "agency_admin" ||
+      (agencyRole === "agency_user" &&
+        !!(await prisma.agencyUserAccess.findUnique({ where: { userId_tenantId: { userId, tenantId } } })));
+    if (!allowed) return { ok: false, error: "Você não tem acesso a esta conta" };
+  }
+
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { status: true, disabledPermissions: true },
+  });
+  if (!tenant) return { ok: false, error: "Conta não encontrada" };
+  if (!agencyRole && tenant.status !== "active") {
+    return { ok: false, error: "Esta conta está suspensa — fale com a agência" };
+  }
+
+  const role = acting ? "admin" : user.role;
+  const permissions = resolvePermissions(role, acting ? {} : user.permissions);
+  if (!agencyRole) {
+    for (const key of disabledPermissionList(tenant.disabledPermissions)) permissions.delete(key);
+  }
+
+  return {
+    ok: true,
+    auth: { sub: userId, tenantId, role, permissions, agencyRole, homeTenantId: user.tenantId, acting },
+  };
+}
+
 // O papel e as permissões vêm do banco a cada request, não do JWT: assim
-// desativar um usuário ou mudar as permissões dele vale na hora, sem
-// esperar o access token (1h) expirar.
+// desativar um usuário, mudar as permissões dele ou tirar o acesso de
+// agência a uma conta vale na hora, sem esperar o access token (1h) expirar.
 async function loadAuth(token: string, reply: FastifyReply): Promise<RequestAuth | null> {
   let payload: AuthPayload;
   try {
@@ -32,21 +92,12 @@ async function loadAuth(token: string, reply: FastifyReply): Promise<RequestAuth
     return null;
   }
 
-  const user = await prisma.user.findUnique({
-    where: { id: payload.sub },
-    select: { tenantId: true, role: true, permissions: true, active: true },
-  });
-  if (!user || !user.active || user.tenantId !== payload.tenantId) {
-    reply.status(401).send({ error: "Usuário desativado ou sem acesso a esta conta" });
+  const session = await resolveSession(payload.sub, payload.tenantId);
+  if (!session.ok) {
+    reply.status(401).send({ error: session.error });
     return null;
   }
-
-  return {
-    sub: payload.sub,
-    tenantId: user.tenantId,
-    role: user.role,
-    permissions: resolvePermissions(user.role, user.permissions),
-  };
+  return session.auth;
 }
 
 export async function authenticate(request: FastifyRequest, reply: FastifyReply) {

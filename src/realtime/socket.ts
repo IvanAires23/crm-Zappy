@@ -6,7 +6,7 @@ import { env } from "../config/env.js";
 import { allowedOrigins } from "../config/corsOrigins.js";
 import { REALTIME_CHANNEL } from "./bus.js";
 import type { RealtimeEnvelope } from "./events.js";
-import type { AuthPayload } from "../auth/auth.plugin.js";
+import { resolveSession, type AuthPayload } from "../auth/auth.plugin.js";
 import { Sentry } from "../config/sentry.js";
 
 // Só a API (não os workers) segura essa instância — os workers publicam
@@ -23,12 +23,25 @@ export function setupRealtime(httpServer: HTTPServer) {
       next(new Error("Token ausente"));
       return;
     }
+    let payload: AuthPayload;
     try {
-      socket.data.auth = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
-      next();
+      payload = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
     } catch {
       next(new Error("Token inválido ou expirado"));
+      return;
     }
+    // Mesma checagem das rotas HTTP: usuário ativo e com acesso à conta do
+    // token (agência só entra na sala das contas liberadas pra ela).
+    resolveSession(payload.sub, payload.tenantId)
+      .then((session) => {
+        if (!session.ok) {
+          next(new Error(session.error));
+          return;
+        }
+        socket.data.auth = payload;
+        next();
+      })
+      .catch(() => next(new Error("Falha ao validar a sessão")));
   });
 
   io.on("connection", (socket) => {

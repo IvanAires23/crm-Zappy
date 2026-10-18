@@ -65,6 +65,18 @@ Uma pasta por domínio, cada uma com `*.routes.ts` registrado em
   e use `conversationScope`/`dealScope`/`ownWorkScope` no `where` quando
   a permissão "só atribuídas" se aplicar. Chave nova no catálogo aparece
   sozinha na tela de equipe do frontend.
+- **Agência (multi-conta, estilo GHL)** — `src/agency/agency.routes.ts`:
+  `User.agencyRole` = `agency_admin` (conta master, vê todas as contas) |
+  `agency_user` (só as contas em `AgencyUserAccess`) | null. Usuários de
+  agência vivem na conta de origem da agência; "entrar" numa conta
+  (`POST /agency/accounts/:id/enter`) emite tokens com o `tenantId` dela
+  (o `RefreshToken.actingTenantId` mantém a conta no refresh). Toda a
+  regra fica em `resolveSession()` (`auth.plugin.ts`), usada por request,
+  login, refresh e socket: agência em conta de cliente = padrões de
+  admin; `Tenant.disabledPermissions` (módulos desligados pela agência)
+  corta permissões só de quem não é agência; conta `suspended` bloqueia
+  os usuários dela, não a agência. Rotas continuam usando só
+  `request.auth.tenantId` — não precisam saber de agência.
 - **Toda query Prisma é escopada por `tenantId`** (`request.auth.tenantId`).
   Não existe query "global" nas rotas de negócio.
 - **Comentários em português, curtos, só quando explicam o "porquê"** (uma
@@ -314,8 +326,9 @@ artifact — peça pro usuário o link se precisar, ou refaça a auditoria.
 - Sem contador de não lidas.
 - Sem atribuição/transferência de conversa (o campo existe no schema, falta rota+tela).
 - ~~Papéis `admin`/`agent` existem no schema mas nenhuma rota valida permissão.~~
-  Feito em 18/10/2026 (permissões por usuário). Próxima etapa: camada de
-  agência (superusuário com acesso a várias contas).
+  Feito em 18/10/2026 (permissões por usuário + camada de agência).
+  Pendente: eventos do socket ainda vão pra sala da conta inteira, sem
+  filtrar pelo escopo "só atribuídas" do usuário.
 
 **P2 — qualidade:**
 - Zero testes automatizados, zero CI.
