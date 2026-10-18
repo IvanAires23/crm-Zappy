@@ -56,6 +56,15 @@ Uma pasta por domínio, cada uma com `*.routes.ts` registrado em
 - **Nunca devolva o objeto `flatten()` do Zod direto como `error`** — vira
   `[object Object]` no front. Sempre extraia uma mensagem string (ver
   `firstZodMessage` em `customFieldDefinitions.routes.ts` como padrão).
+- **Permissões (estilo GHL)**: papéis `admin` | `user` + chaves liga/desliga
+  por usuário, catálogo em `src/auth/permissions.ts` (`User.permissions`
+  guarda só o que difere do padrão do papel). `authenticate` lê papel e
+  permissões **do banco a cada request** (mudança vale na hora) e popula
+  `request.auth.permissions`. Rota nova: proteja com
+  `requirePermission("x")` / `requireAnyPermission(...)` no `preHandler`,
+  e use `conversationScope`/`dealScope`/`ownWorkScope` no `where` quando
+  a permissão "só atribuídas" se aplicar. Chave nova no catálogo aparece
+  sozinha na tela de equipe do frontend.
 - **Toda query Prisma é escopada por `tenantId`** (`request.auth.tenantId`).
   Não existe query "global" nas rotas de negócio.
 - **Comentários em português, curtos, só quando explicam o "porquê"** (uma
@@ -304,7 +313,9 @@ artifact — peça pro usuário o link se precisar, ou refaça a auditoria.
 - Sem cadastro de usuários (só existe login; criar atendente é manual no banco).
 - Sem contador de não lidas.
 - Sem atribuição/transferência de conversa (o campo existe no schema, falta rota+tela).
-- Papéis `admin`/`agent` existem no schema mas nenhuma rota valida permissão.
+- ~~Papéis `admin`/`agent` existem no schema mas nenhuma rota valida permissão.~~
+  Feito em 18/10/2026 (permissões por usuário). Próxima etapa: camada de
+  agência (superusuário com acesso a várias contas).
 
 **P2 — qualidade:**
 - Zero testes automatizados, zero CI.
