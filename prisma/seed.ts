@@ -21,8 +21,9 @@ async function main() {
       email: "admin@demo.com",
       passwordHash,
       role: "admin",
+      agencyRole: "agency_admin",
     },
-    update: { passwordHash },
+    update: { passwordHash, agencyRole: "agency_admin" },
   });
 
   console.log("Seed ok:", { tenant: tenant.slug, user: user.email, senha: "admin123" });

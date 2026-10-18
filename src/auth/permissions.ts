@@ -136,3 +136,15 @@ export function compactOverrides(roleInput: string, values: Record<string, boole
   }
   return result;
 }
+
+// Chaves que a agência pode desligar numa conta inteira. Ficam de fora as
+// "restritivas" (desligar ampliaria o acesso, não reduziria) e
+// users.manage (a conta precisa de alguém que gerencie a equipe).
+export function isAgencyTogglable(key: string): boolean {
+  const perm = BY_KEY.get(key);
+  return !!perm && !perm.restriction && perm.key !== "users.manage";
+}
+
+export function disabledPermissionList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((k): k is string => typeof k === "string" && isAgencyTogglable(k)) : [];
+}

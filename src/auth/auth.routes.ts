@@ -1,60 +1,13 @@
-import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { z } from "zod";
-import { env } from "../config/env.js";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "./auth.plugin.js";
-import { PERMISSIONS, normalizeRole, resolvePermissions } from "./permissions.js";
+import { PERMISSIONS, disabledPermissionList } from "./permissions.js";
+import { hashToken, issueSession, sessionUser } from "./session.js";
 
 function firstZodMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Dados inválidos";
-}
-
-const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias
-
-function hashToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
-}
-
-function signAccessToken(user: { id: string; tenantId: string; role: string }): string {
-  // Curto de propósito — a longevidade da sessão agora vem do refresh
-  // token (30 dias), não do access token. Sem isso um token vazado/roubado
-  // continuaria válido por horas; agora só por até 1h.
-  return jwt.sign({ sub: user.id, tenantId: user.tenantId, role: user.role }, env.JWT_SECRET, {
-    expiresIn: "1h",
-  });
-}
-
-async function issueRefreshToken(userId: string): Promise<string> {
-  const token = crypto.randomBytes(32).toString("hex");
-  await prisma.refreshToken.create({
-    data: {
-      userId,
-      tokenHash: hashToken(token),
-      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
-    },
-  });
-  return token;
-}
-
-function serializeUser(user: {
-  id: string;
-  name: string;
-  email: string;
-  role: string;
-  tenantId: string;
-  permissions?: unknown;
-}) {
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: normalizeRole(user.role),
-    tenantId: user.tenantId,
-    permissions: [...resolvePermissions(user.role, user.permissions)],
-  };
 }
 
 const loginSchema = z.object({
@@ -98,10 +51,11 @@ export async function authRoutes(app: FastifyInstance) {
         })
         .catch(() => {});
 
-      const token = signAccessToken(user);
-      const refreshToken = await issueRefreshToken(user.id);
-
-      return reply.send({ token, refreshToken, user: serializeUser(user) });
+      const session = await issueSession(user.id, user.tenantId);
+      if (!session.ok) {
+        return reply.status(403).send({ error: session.error });
+      }
+      return reply.send(session.body);
     }
   );
 
@@ -126,10 +80,15 @@ export async function authRoutes(app: FastifyInstance) {
 
     await prisma.refreshToken.update({ where: { id: stored.id }, data: { revokedAt: new Date() } });
 
-    const token = signAccessToken(stored.user);
-    const refreshToken = await issueRefreshToken(stored.user.id);
-
-    return reply.send({ token, refreshToken, user: serializeUser(stored.user) });
+    // Se o acesso à conta em que ele estava foi retirado, volta pra de origem.
+    let session = await issueSession(stored.user.id, stored.actingTenantId ?? stored.user.tenantId);
+    if (!session.ok && stored.actingTenantId) {
+      session = await issueSession(stored.user.id, stored.user.tenantId);
+    }
+    if (!session.ok) {
+      return reply.status(401).send({ error: session.error });
+    }
+    return reply.send(session.body);
   });
 
   // Revoga o refresh token no logout — sem isso, um token capturado antes
@@ -148,15 +107,18 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.get("/auth/me", { preHandler: authenticate }, async (request, reply) => {
-    const user = await prisma.user.findUnique({ where: { id: request.auth.sub } });
-    if (!user) {
-      return reply.status(404).send({ error: "Usuário não encontrado" });
-    }
-    return reply.send(serializeUser(user));
+    return reply.send(await sessionUser(request.auth));
   });
 
-  // Catálogo de permissões pra tela de equipe desenhar as chaves.
-  app.get("/auth/permissions", { preHandler: authenticate }, async (_request, reply) => {
-    return reply.send(PERMISSIONS);
+  // Catálogo de permissões pra tela de equipe desenhar as chaves. Módulos
+  // que a agência desligou nesta conta vêm marcados — o admin da conta vê,
+  // mas não consegue ligar.
+  app.get("/auth/permissions", { preHandler: authenticate }, async (request, reply) => {
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: request.auth.tenantId },
+      select: { disabledPermissions: true },
+    });
+    const disabled = new Set(disabledPermissionList(tenant?.disabledPermissions));
+    return reply.send(PERMISSIONS.map((p) => (disabled.has(p.key) ? { ...p, disabledByAgency: true } : p)));
   });
 }

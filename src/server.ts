@@ -29,6 +29,7 @@ import { notesRoutes } from "./notes/notes.routes.js";
 import { quickRepliesRoutes } from "./quickReplies/quickReplies.routes.js";
 import { mediaRoutes } from "./media/media.routes.js";
 import { usersRoutes } from "./users/users.routes.js";
+import { agencyRoutes } from "./agency/agency.routes.js";
 import { chatbotRoutes } from "./chatbot/chatbot.routes.js";
 import { setupRealtime } from "./realtime/socket.js";
 
@@ -128,6 +129,7 @@ async function main() {
   await app.register(quickRepliesRoutes);
   await app.register(mediaRoutes);
   await app.register(usersRoutes);
+  await app.register(agencyRoutes);
   await app.register(chatbotRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
