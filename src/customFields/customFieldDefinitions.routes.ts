@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 
 // Extrai a primeira mensagem de validação legível — sem isso o front recebia
 // o objeto flatten() cru e mostrava "[object Object]" pro usuário.
@@ -60,7 +60,7 @@ export async function customFieldDefinitionsRoutes(app: FastifyInstance) {
     return reply.send(definitions);
   });
 
-  app.post("/custom-fields", async (request, reply) => {
+  app.post("/custom-fields", { preHandler: requirePermission("custom_fields.manage") }, async (request, reply) => {
     const parsed = createDefinitionSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: firstZodMessage(parsed.error) });
@@ -95,7 +95,7 @@ export async function customFieldDefinitionsRoutes(app: FastifyInstance) {
     return reply.status(201).send(definition);
   });
 
-  app.patch("/custom-fields/:id", async (request, reply) => {
+  app.patch("/custom-fields/:id", { preHandler: requirePermission("custom_fields.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -131,7 +131,7 @@ export async function customFieldDefinitionsRoutes(app: FastifyInstance) {
     return reply.send(definition);
   });
 
-  app.delete("/custom-fields/:id", async (request, reply) => {
+  app.delete("/custom-fields/:id", { preHandler: requirePermission("custom_fields.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 

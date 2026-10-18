@@ -6,6 +6,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { prisma } from "../db/prisma.js";
 import { authenticate } from "./auth.plugin.js";
+import { PERMISSIONS, normalizeRole, resolvePermissions } from "./permissions.js";
 
 function firstZodMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Dados inválidos";
@@ -38,8 +39,22 @@ async function issueRefreshToken(userId: string): Promise<string> {
   return token;
 }
 
-function serializeUser(user: { id: string; name: string; email: string; role: string; tenantId: string }) {
-  return { id: user.id, name: user.name, email: user.email, role: user.role, tenantId: user.tenantId };
+function serializeUser(user: {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  tenantId: string;
+  permissions?: unknown;
+}) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: normalizeRole(user.role),
+    tenantId: user.tenantId,
+    permissions: [...resolvePermissions(user.role, user.permissions)],
+  };
 }
 
 const loginSchema = z.object({
@@ -138,5 +153,10 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Usuário não encontrado" });
     }
     return reply.send(serializeUser(user));
+  });
+
+  // Catálogo de permissões pra tela de equipe desenhar as chaves.
+  app.get("/auth/permissions", { preHandler: authenticate }, async (_request, reply) => {
+    return reply.send(PERMISSIONS);
   });
 }

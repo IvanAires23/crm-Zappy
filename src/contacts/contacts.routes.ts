@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, dealScope, requireAnyPermission, requirePermission } from "../auth/auth.plugin.js";
 import { resolveTagId } from "../tags/findOrCreateTag.js";
 import { emitAutomationEvent } from "../automation/emit.js";
 import { getTenantProvider } from "../whatsapp/client.js";
@@ -46,7 +46,7 @@ export async function contactsRoutes(app: FastifyInstance) {
   // Cadastro manual: nome + telefone e já abre (ou reaproveita) uma
   // conversa, pra dar pra mandar mensagem na hora — sem depender de uma
   // mensagem inbound pra criar o contato primeiro.
-  app.post("/contacts", async (request, reply) => {
+  app.post("/contacts", { preHandler: requireAnyPermission("conversations.start", "contacts.edit") }, async (request, reply) => {
     const parsed = createContactSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: firstZodMessage(parsed.error) });
@@ -84,7 +84,7 @@ export async function contactsRoutes(app: FastifyInstance) {
     });
   });
 
-  app.get("/contacts", async (request, reply) => {
+  app.get("/contacts", { preHandler: requireAnyPermission("contacts.view", "conversations.view") }, async (request, reply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -122,7 +122,7 @@ export async function contactsRoutes(app: FastifyInstance) {
     return reply.send({ contacts, total, page, pageSize });
   });
 
-  app.get("/contacts/:id", async (request, reply) => {
+  app.get("/contacts/:id", { preHandler: requireAnyPermission("contacts.view", "conversations.view") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -131,6 +131,7 @@ export async function contactsRoutes(app: FastifyInstance) {
       include: {
         tags: { include: { tag: true } },
         deals: {
+          where: dealScope(request),
           include: { stage: { select: { id: true, name: true } }, pipeline: { select: { id: true, name: true } } },
         },
         conversations: { select: { id: true, status: true, lastMessageAt: true } },
@@ -141,7 +142,7 @@ export async function contactsRoutes(app: FastifyInstance) {
     return reply.send(contact);
   });
 
-  app.post("/contacts/:id/tags", async (request, reply) => {
+  app.post("/contacts/:id/tags", { preHandler: requirePermission("contacts.edit") }, async (request, reply) => {
     const { id: contactId } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -174,7 +175,7 @@ export async function contactsRoutes(app: FastifyInstance) {
     return reply.status(201).send(link);
   });
 
-  app.delete("/contacts/:id/tags/:tagId", async (request, reply) => {
+  app.delete("/contacts/:id/tags/:tagId", { preHandler: requirePermission("contacts.edit") }, async (request, reply) => {
     const { id: contactId, tagId } = request.params as { id: string; tagId: string };
     const tenantId = request.auth.tenantId;
 

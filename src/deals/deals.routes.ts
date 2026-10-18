@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, dealScope, requirePermission } from "../auth/auth.plugin.js";
 import { resolveTagId } from "../tags/findOrCreateTag.js";
 import { emitAutomationEvent } from "../automation/emit.js";
 
@@ -59,7 +59,7 @@ const listQuerySchema = z.object({
 export async function dealsRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
 
-  app.post("/deals", async (request, reply) => {
+  app.post("/deals", { preHandler: requirePermission("deals.edit") }, async (request, reply) => {
     const parsed = createDealSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -131,7 +131,7 @@ export async function dealsRoutes(app: FastifyInstance) {
     return reply.status(201).send(deal);
   });
 
-  app.get("/deals", async (request, reply) => {
+  app.get("/deals", { preHandler: requirePermission("deals.view") }, async (request, reply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -141,6 +141,7 @@ export async function dealsRoutes(app: FastifyInstance) {
 
     const where = {
       tenantId,
+      ...dealScope(request),
       ...(pipelineId ? { pipelineId } : {}),
       ...(stageId ? { stageId } : {}),
       ...(assignedUserId ? { assignedUserId } : {}),
@@ -168,12 +169,12 @@ export async function dealsRoutes(app: FastifyInstance) {
     return reply.send({ deals, total, page, pageSize });
   });
 
-  app.get("/deals/:id", async (request, reply) => {
+  app.get("/deals/:id", { preHandler: requirePermission("deals.view") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
     const deal = await prisma.deal.findFirst({
-      where: { id, tenantId },
+      where: { id, tenantId, ...dealScope(request) },
       include: {
         pipeline: { select: { id: true, name: true } },
         stage: { select: { id: true, name: true } },
@@ -204,7 +205,7 @@ export async function dealsRoutes(app: FastifyInstance) {
     return reply.send(deal);
   });
 
-  app.patch("/deals/:id", async (request, reply) => {
+  app.patch("/deals/:id", { preHandler: requirePermission("deals.edit") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -213,7 +214,7 @@ export async function dealsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
 
-    const existing = await prisma.deal.findFirst({ where: { id, tenantId } });
+    const existing = await prisma.deal.findFirst({ where: { id, tenantId, ...dealScope(request) } });
     if (!existing) return reply.status(404).send({ error: "Deal não encontrado" });
 
     if (parsed.data.contactId) {
@@ -251,7 +252,7 @@ export async function dealsRoutes(app: FastifyInstance) {
 
   // Move o deal pra outro estágio (ou só reordena dentro do mesmo estágio).
   // Bloqueia mover um deal já ganho/perdido — reabra primeiro via /status.
-  app.patch("/deals/:id/stage", async (request, reply) => {
+  app.patch("/deals/:id/stage", { preHandler: requirePermission("deals.edit") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -260,7 +261,7 @@ export async function dealsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
 
-    const deal = await prisma.deal.findFirst({ where: { id, tenantId } });
+    const deal = await prisma.deal.findFirst({ where: { id, tenantId, ...dealScope(request) } });
     if (!deal) return reply.status(404).send({ error: "Deal não encontrado" });
 
     if (deal.status !== "open") {
@@ -326,7 +327,7 @@ export async function dealsRoutes(app: FastifyInstance) {
   });
 
   // Marca o deal como ganho/perdido, ou reabre (status: "open").
-  app.patch("/deals/:id/status", async (request, reply) => {
+  app.patch("/deals/:id/status", { preHandler: requirePermission("deals.edit") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -335,7 +336,7 @@ export async function dealsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
 
-    const deal = await prisma.deal.findFirst({ where: { id, tenantId } });
+    const deal = await prisma.deal.findFirst({ where: { id, tenantId, ...dealScope(request) } });
     if (!deal) return reply.status(404).send({ error: "Deal não encontrado" });
 
     const { status, lostReason } = parsed.data;
@@ -363,7 +364,7 @@ export async function dealsRoutes(app: FastifyInstance) {
     return reply.send(updated);
   });
 
-  app.post("/deals/:id/tags", async (request, reply) => {
+  app.post("/deals/:id/tags", { preHandler: requirePermission("deals.edit") }, async (request, reply) => {
     const { id: dealId } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -372,7 +373,7 @@ export async function dealsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
 
-    const deal = await prisma.deal.findFirst({ where: { id: dealId, tenantId } });
+    const deal = await prisma.deal.findFirst({ where: { id: dealId, tenantId, ...dealScope(request) } });
     if (!deal) return reply.status(404).send({ error: "Deal não encontrado" });
 
     const resolved = await resolveTagId(tenantId, parsed.data);
@@ -394,22 +395,22 @@ export async function dealsRoutes(app: FastifyInstance) {
     return reply.status(201).send(link);
   });
 
-  app.delete("/deals/:id/tags/:tagId", async (request, reply) => {
+  app.delete("/deals/:id/tags/:tagId", { preHandler: requirePermission("deals.edit") }, async (request, reply) => {
     const { id: dealId, tagId } = request.params as { id: string; tagId: string };
     const tenantId = request.auth.tenantId;
 
-    const deal = await prisma.deal.findFirst({ where: { id: dealId, tenantId } });
+    const deal = await prisma.deal.findFirst({ where: { id: dealId, tenantId, ...dealScope(request) } });
     if (!deal) return reply.status(404).send({ error: "Deal não encontrado" });
 
     await prisma.dealTag.deleteMany({ where: { dealId, tagId } });
     return reply.status(204).send();
   });
 
-  app.delete("/deals/:id", async (request, reply) => {
+  app.delete("/deals/:id", { preHandler: requirePermission("deals.delete") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
-    const existing = await prisma.deal.findFirst({ where: { id, tenantId } });
+    const existing = await prisma.deal.findFirst({ where: { id, tenantId, ...dealScope(request) } });
     if (!existing) return reply.status(404).send({ error: "Deal não encontrado" });
 
     await prisma.$transaction([

@@ -109,7 +109,10 @@ model User {
   name         String
   email        String
   passwordHash String
-  role         String   @default("agent") // admin | agent
+  role         String   @default("user") // admin | user (ver src/auth/permissions.ts)
+  // Exceções às permissões padrão do papel — só as chaves que diferem do
+  // padrão, ex: {"broadcasts.manage": true}.
+  permissions  Json     @default("{}")
   // Desativar em vez de excluir — preserva o histórico de notas/tarefas/
   // conversas já atribuídas a esse usuário. Login rejeita active=false.
   active       Boolean  @default(true)

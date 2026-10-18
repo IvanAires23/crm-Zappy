@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, conversationScope, hasPermission, requirePermission } from "../auth/auth.plugin.js";
 import { outboundQueue } from "../queue/queue.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import { uploadMedia, getTenantProvider } from "../whatsapp/client.js";
@@ -63,6 +63,7 @@ function extractMessagePreview(message: { direction: string; type: string; conte
 
 export async function conversationsRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
+  app.addHook("preHandler", requirePermission("conversations.view"));
 
   // Paginação por cursor (id da última conversa já carregada) — sem isso,
   // uma conta com milhares de conversas carrega tudo de uma vez na lista.
@@ -83,7 +84,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
             : {};
 
     const conversations = await prisma.conversation.findMany({
-      where: { tenantId: request.auth.tenantId, ...assignedFilter },
+      where: { tenantId: request.auth.tenantId, AND: [assignedFilter, conversationScope(request)] },
       include: {
         contact: true,
         assignedUser: { select: { id: true, name: true } },
@@ -133,7 +134,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const conversation = await prisma.conversation.findFirst({
-      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      where: { id: params.data.id, tenantId: request.auth.tenantId, ...conversationScope(request) },
     });
     if (!conversation) {
       return reply.status(404).send({ error: "Conversa não encontrada" });
@@ -168,7 +169,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const conversation = await prisma.conversation.findFirst({
-      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      where: { id: params.data.id, tenantId: request.auth.tenantId, ...conversationScope(request) },
       include: { contact: true },
     });
     if (!conversation) {
@@ -236,7 +237,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const conversation = await prisma.conversation.findFirst({
-      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      where: { id: params.data.id, tenantId: request.auth.tenantId, ...conversationScope(request) },
       include: { contact: true },
     });
     if (!conversation) {
@@ -313,7 +314,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const conversation = await prisma.conversation.findFirst({
-      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      where: { id: params.data.id, tenantId: request.auth.tenantId, ...conversationScope(request) },
       include: { contact: true },
     });
     if (!conversation) {
@@ -396,7 +397,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const conversation = await prisma.conversation.findFirst({
-      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      where: { id: params.data.id, tenantId: request.auth.tenantId, ...conversationScope(request) },
     });
     if (!conversation) {
       return reply.status(404).send({ error: "Conversa não encontrada" });
@@ -424,7 +425,12 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const scheduled = await prisma.scheduledMessage.findMany({
-      where: { conversationId: params.data.id, tenantId: request.auth.tenantId, status: "pending" },
+      where: {
+        conversationId: params.data.id,
+        tenantId: request.auth.tenantId,
+        status: "pending",
+        conversation: conversationScope(request),
+      },
       orderBy: { scheduledFor: "asc" },
     });
 
@@ -438,7 +444,12 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const existing = await prisma.scheduledMessage.findFirst({
-      where: { id: params.data.scheduledMessageId, conversationId: params.data.id, tenantId: request.auth.tenantId },
+      where: {
+        id: params.data.scheduledMessageId,
+        conversationId: params.data.id,
+        tenantId: request.auth.tenantId,
+        conversation: conversationScope(request),
+      },
     });
     if (!existing) {
       return reply.status(404).send({ error: "Mensagem agendada não encontrada" });
@@ -462,7 +473,7 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const conversation = await prisma.conversation.findFirst({
-      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      where: { id: params.data.id, tenantId: request.auth.tenantId, ...conversationScope(request) },
     });
     if (!conversation) {
       return reply.status(404).send({ error: "Conversa não encontrada" });
@@ -482,9 +493,9 @@ export async function conversationsRoutes(app: FastifyInstance) {
     return reply.send({ lastReadAt: updated.lastReadAt });
   });
 
-  // Atribui/transfere/desatribui uma conversa — qualquer atendente pode
-  // (não é admin-only: é assim que o time se organiza no dia a dia,
-  // pegando conversas pra si ou passando pra outro colega).
+  // Atribui/transfere/desatribui uma conversa. "Assumir" (atribuir a si
+  // mesmo) é sempre permitido pra quem vê a conversa; passar pra outra
+  // pessoa ou tirar o responsável exige conversations.transfer.
   app.patch("/conversations/:id/assign", async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     if (!params.success) {
@@ -496,10 +507,15 @@ export async function conversationsRoutes(app: FastifyInstance) {
     }
 
     const conversation = await prisma.conversation.findFirst({
-      where: { id: params.data.id, tenantId: request.auth.tenantId },
+      where: { id: params.data.id, tenantId: request.auth.tenantId, ...conversationScope(request) },
     });
     if (!conversation) {
       return reply.status(404).send({ error: "Conversa não encontrada" });
+    }
+
+    const isSelfAssign = body.data.userId === request.auth.sub;
+    if (!isSelfAssign && !hasPermission(request, "conversations.transfer")) {
+      return reply.status(403).send({ error: "Você não tem permissão para transferir conversas" });
     }
 
     if (body.data.userId) {

@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 import { actionSchema } from "./rules.routes.js";
 import type { WorkflowGraph } from "./workflow.js";
 
@@ -118,7 +118,7 @@ function validateGraph(graph: WorkflowGraph): string | null {
 export async function automationWorkflowsRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
 
-  app.get("/automation/workflows", async (request, reply) => {
+  app.get("/automation/workflows", { preHandler: requirePermission("automations.view") }, async (request, reply) => {
     const tenantId = request.auth.tenantId;
     const workflows = await prisma.automationWorkflow.findMany({
       where: { tenantId },
@@ -135,7 +135,7 @@ export async function automationWorkflowsRoutes(app: FastifyInstance) {
     return reply.send(workflows.map((w) => ({ ...w, runCount: countByWorkflow.get(w.id) ?? 0 })));
   });
 
-  app.post("/automation/workflows", async (request, reply) => {
+  app.post("/automation/workflows", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body);
     if (!parsed.success) return reply.status(400).send({ error: firstZodMessage(parsed.error) });
 
@@ -150,14 +150,14 @@ export async function automationWorkflowsRoutes(app: FastifyInstance) {
     return reply.status(201).send(workflow);
   });
 
-  app.get("/automation/workflows/:id", async (request, reply) => {
+  app.get("/automation/workflows/:id", { preHandler: requirePermission("automations.view") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const workflow = await prisma.automationWorkflow.findFirst({ where: { id, tenantId: request.auth.tenantId } });
     if (!workflow) return reply.status(404).send({ error: "Automação não encontrada" });
     return reply.send(workflow);
   });
 
-  app.patch("/automation/workflows/:id", async (request, reply) => {
+  app.patch("/automation/workflows/:id", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -190,7 +190,7 @@ export async function automationWorkflowsRoutes(app: FastifyInstance) {
     return reply.send(workflow);
   });
 
-  app.delete("/automation/workflows/:id", async (request, reply) => {
+  app.delete("/automation/workflows/:id", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const existing = await prisma.automationWorkflow.findFirst({ where: { id, tenantId: request.auth.tenantId } });
     if (!existing) return reply.status(404).send({ error: "Automação não encontrada" });
@@ -204,7 +204,7 @@ export async function automationWorkflowsRoutes(app: FastifyInstance) {
 
   // Registros de execução — uma linha por contato/evento inscrito, com o
   // log de cada passo.
-  app.get("/automation/workflows/:id/runs", async (request, reply) => {
+  app.get("/automation/workflows/:id/runs", { preHandler: requirePermission("automations.view") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
     const workflow = await prisma.automationWorkflow.findFirst({ where: { id, tenantId } });

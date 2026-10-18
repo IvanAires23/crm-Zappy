@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, dealScope, requirePermission } from "../auth/auth.plugin.js";
 
 const stageInputSchema = z.object({
   name: z.string().min(1),
@@ -29,7 +29,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
 
   // Cria um pipeline. Se nenhum estágio for informado, cria um estágio
   // padrão "Novo" — um pipeline sem estágio não serve pra nada.
-  app.post("/pipelines", async (request, reply) => {
+  app.post("/pipelines", { preHandler: requirePermission("pipelines.manage") }, async (request, reply) => {
     const parsed = createPipelineSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -106,7 +106,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
 
   // Visão de Kanban: estágios com os deals dentro de cada um, já ordenados
   // por posição — é o formato que o frontend consome direto pra montar o board.
-  app.get("/pipelines/:id/board", async (request, reply) => {
+  app.get("/pipelines/:id/board", { preHandler: requirePermission("deals.view") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -117,6 +117,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
           orderBy: { order: "asc" },
           include: {
             deals: {
+              where: dealScope(request),
               orderBy: { position: "asc" },
               include: {
                 contact: { select: { id: true, name: true, phone: true } },
@@ -134,7 +135,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
     return reply.send(pipeline);
   });
 
-  app.patch("/pipelines/:id", async (request, reply) => {
+  app.patch("/pipelines/:id", { preHandler: requirePermission("pipelines.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -165,7 +166,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
   });
 
   // Arquiva (não deleta de verdade — preserva histórico dos deals antigos).
-  app.delete("/pipelines/:id", async (request, reply) => {
+  app.delete("/pipelines/:id", { preHandler: requirePermission("pipelines.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -178,7 +179,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
 
   // --- Estágios ---
 
-  app.post("/pipelines/:id/stages", async (request, reply) => {
+  app.post("/pipelines/:id/stages", { preHandler: requirePermission("pipelines.manage") }, async (request, reply) => {
     const { id: pipelineId } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -208,7 +209,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
     return reply.status(201).send(stage);
   });
 
-  app.patch("/pipelines/:pipelineId/stages/:stageId", async (request, reply) => {
+  app.patch("/pipelines/:pipelineId/stages/:stageId", { preHandler: requirePermission("pipelines.manage") }, async (request, reply) => {
     const { pipelineId, stageId } = request.params as { pipelineId: string; stageId: string };
     const tenantId = request.auth.tenantId;
 
@@ -231,7 +232,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
   });
 
   // Não deixa deletar estágio com deals dentro — força mover antes.
-  app.delete("/pipelines/:pipelineId/stages/:stageId", async (request, reply) => {
+  app.delete("/pipelines/:pipelineId/stages/:stageId", { preHandler: requirePermission("pipelines.manage") }, async (request, reply) => {
     const { pipelineId, stageId } = request.params as { pipelineId: string; stageId: string };
     const tenantId = request.auth.tenantId;
 
@@ -267,7 +268,7 @@ export async function pipelinesRoutes(app: FastifyInstance) {
   // Reordena os estágios de um pipeline. Recebe a lista completa de IDs
   // na nova ordem. Usa uma passada intermediária com valores negativos
   // pra não colidir com a constraint única (pipelineId, order) no meio do caminho.
-  app.post("/pipelines/:id/stages/reorder", async (request, reply) => {
+  app.post("/pipelines/:id/stages/reorder", { preHandler: requirePermission("pipelines.manage") }, async (request, reply) => {
     const { id: pipelineId } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticateFromHeaderOrQuery } from "../auth/auth.plugin.js";
+import { authenticateFromHeaderOrQuery, conversationScope, requirePermission } from "../auth/auth.plugin.js";
 import { downloadMedia } from "../whatsapp/client.js";
 
 function firstZodMessage(error: z.ZodError): string {
@@ -32,14 +32,17 @@ export async function mediaRoutes(app: FastifyInstance) {
   // Proxy autenticado: a Meta hospeda o arquivo de verdade (não guardamos
   // cópia local), mas a URL de download dela é assinada e expira em minutos
   // — então resolvemos ela de novo a cada request em vez de cachear.
-  app.get("/media/:messageId", { preHandler: authenticateFromHeaderOrQuery }, async (request, reply) => {
+  app.get(
+    "/media/:messageId",
+    { preHandler: [authenticateFromHeaderOrQuery, requirePermission("conversations.view")] },
+    async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     if (!params.success) {
       return reply.status(400).send({ error: firstZodMessage(params.error) });
     }
 
     const message = await prisma.message.findFirst({
-      where: { id: params.data.messageId, tenantId: request.auth.tenantId },
+      where: { id: params.data.messageId, tenantId: request.auth.tenantId, conversation: conversationScope(request) },
     });
     if (!message) {
       return reply.status(404).send({ error: "Mensagem não encontrada" });
