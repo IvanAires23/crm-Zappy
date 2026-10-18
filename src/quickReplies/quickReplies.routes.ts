@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 
 const createQuickReplySchema = z.object({
   title: z.string().min(1).max(80),
@@ -27,7 +27,7 @@ export async function quickRepliesRoutes(app: FastifyInstance) {
     return reply.send(quickReplies);
   });
 
-  app.post("/quick-replies", async (request, reply) => {
+  app.post("/quick-replies", { preHandler: requirePermission("quick_replies.manage") }, async (request, reply) => {
     const parsed = createQuickReplySchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -46,7 +46,7 @@ export async function quickRepliesRoutes(app: FastifyInstance) {
     return reply.status(201).send(quickReply);
   });
 
-  app.patch("/quick-replies/:id", async (request, reply) => {
+  app.patch("/quick-replies/:id", { preHandler: requirePermission("quick_replies.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -69,7 +69,7 @@ export async function quickRepliesRoutes(app: FastifyInstance) {
     return reply.send(quickReply);
   });
 
-  app.delete("/quick-replies/:id", async (request, reply) => {
+  app.delete("/quick-replies/:id", { preHandler: requirePermission("quick_replies.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 

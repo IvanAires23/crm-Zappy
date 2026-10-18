@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requireAnyPermission } from "../auth/auth.plugin.js";
 
 const createNoteSchema = z.object({
   contactId: z.string().min(1),
@@ -20,6 +20,7 @@ const listQuerySchema = z.object({
 
 export async function notesRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
+  app.addHook("preHandler", requireAnyPermission("conversations.view", "contacts.view"));
 
   // Notas são sempre por contato (ficam visíveis em qualquer conversa com
   // ele) — passar conversationId aqui é só um atalho: resolve o contactId

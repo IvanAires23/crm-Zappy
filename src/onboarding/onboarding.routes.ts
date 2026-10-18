@@ -5,7 +5,7 @@ import { env } from "../config/env.js";
 import { prisma } from "../db/prisma.js";
 import { decryptToken, encryptToken } from "../config/crypto.js";
 import { checkCoexistenceStatus, triggerSmbAppDataSync } from "../whatsapp/client.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 import { publishBaileysCommand } from "../whatsapp/baileysCommands.js";
 import { clearLastError, getLastError, getLatestQr, isWorkerOnline } from "../whatsapp/baileysRuntime.js";
 
@@ -126,7 +126,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
   // verdade) e devolve na hora — o QR chega pro front pelo WebSocket
   // (evento "whatsapp:qr") e também em GET /status (polling), não na
   // resposta desta rota.
-  app.post("/onboarding/whatsapp/unofficial/start", async (request, reply) => {
+  app.post("/onboarding/whatsapp/unofficial/start", { preHandler: requirePermission("whatsapp.manage") }, async (request, reply) => {
     const tenantId = request.auth.tenantId;
 
     if (!(await isWorkerOnline())) {
@@ -172,14 +172,14 @@ export async function onboardingRoutes(app: FastifyInstance) {
   // Desconecta a sessão Baileys ativa (equivalente a "sair" do WhatsApp Web
   // pelo celular) — as credenciais antigas são invalidadas, uma nova
   // conexão exige escanear um QR novo.
-  app.post("/onboarding/whatsapp/unofficial/logout", async (request, reply) => {
+  app.post("/onboarding/whatsapp/unofficial/logout", { preHandler: requirePermission("whatsapp.manage") }, async (request, reply) => {
     await publishBaileysCommand({ tenantId: request.auth.tenantId, action: "logout" });
     return reply.status(202).send({ loggedOut: true });
   });
 
   // Chamado pelo frontend logo após o FB.login() do Embedded Signup retornar o `code`.
   // O `code` tem vida curta (~10 min), então essa troca precisa acontecer na hora.
-  app.post("/onboarding/whatsapp/complete", async (request, reply) => {
+  app.post("/onboarding/whatsapp/complete", { preHandler: requirePermission("whatsapp.manage") }, async (request, reply) => {
     const parsed = completeSignupSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: firstZodMessage(parsed.error) });

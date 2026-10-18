@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 
 const createWebhookSchema = z.object({
   name: z.string().min(1),
@@ -23,7 +23,7 @@ export async function automationRoutes(app: FastifyInstance) {
   // Gera o secret aqui — só é devolvido por completo na criação, igual
   // qualquer API key. Depois disso, é usado internamente pra assinar
   // o payload (o tenant precisa dele configurado no lado que recebe).
-  app.post("/automation/webhooks", async (request, reply) => {
+  app.post("/automation/webhooks", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const parsed = createWebhookSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -44,7 +44,7 @@ export async function automationRoutes(app: FastifyInstance) {
     return reply.status(201).send(webhook);
   });
 
-  app.get("/automation/webhooks", async (request, reply) => {
+  app.get("/automation/webhooks", { preHandler: requirePermission("automations.view") }, async (request, reply) => {
     const tenantId = request.auth.tenantId;
 
     const webhooks = await prisma.automationWebhook.findMany({
@@ -55,7 +55,7 @@ export async function automationRoutes(app: FastifyInstance) {
     return reply.send(webhooks);
   });
 
-  app.patch("/automation/webhooks/:id", async (request, reply) => {
+  app.patch("/automation/webhooks/:id", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -71,7 +71,7 @@ export async function automationRoutes(app: FastifyInstance) {
     return reply.send(webhook);
   });
 
-  app.delete("/automation/webhooks/:id", async (request, reply) => {
+  app.delete("/automation/webhooks/:id", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -88,7 +88,7 @@ export async function automationRoutes(app: FastifyInstance) {
 
   // Histórico de entregas — pra debugar automação sem adivinhar se o
   // outro lado (n8n) recebeu o evento.
-  app.get("/automation/webhooks/:id/deliveries", async (request, reply) => {
+  app.get("/automation/webhooks/:id/deliveries", { preHandler: requirePermission("automations.view") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 

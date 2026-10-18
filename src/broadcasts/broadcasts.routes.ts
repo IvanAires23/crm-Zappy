@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 import { outboundQueue } from "../queue/queue.js";
 
 const createBroadcastSchema = z
@@ -26,7 +26,7 @@ async function getOrCreateConversation(tenantId: string, contactId: string) {
 export async function broadcastsRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
 
-  app.post("/broadcasts", async (request, reply) => {
+  app.post("/broadcasts", { preHandler: requirePermission("broadcasts.manage") }, async (request, reply) => {
     const parsed = createBroadcastSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -87,7 +87,7 @@ export async function broadcastsRoutes(app: FastifyInstance) {
     return reply.status(201).send(broadcast);
   });
 
-  app.get("/broadcasts", async (request, reply) => {
+  app.get("/broadcasts", { preHandler: requirePermission("broadcasts.manage") }, async (request, reply) => {
     const tenantId = request.auth.tenantId;
 
     const broadcasts = await prisma.broadcast.findMany({
@@ -99,7 +99,7 @@ export async function broadcastsRoutes(app: FastifyInstance) {
     return reply.send(broadcasts);
   });
 
-  app.get("/broadcasts/:id", async (request, reply) => {
+  app.get("/broadcasts/:id", { preHandler: requirePermission("broadcasts.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 

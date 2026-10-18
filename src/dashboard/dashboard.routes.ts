@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, hasPermission, requirePermission } from "../auth/auth.plugin.js";
 
 const overviewQuerySchema = z.object({
   from: z.coerce.date().optional(),
@@ -34,7 +34,7 @@ function increment<K>(map: Map<K, number>, key: K, by = 1) {
 export async function dashboardRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
 
-  app.get("/dashboard/overview", async (request, reply) => {
+  app.get("/dashboard/overview", { preHandler: requirePermission("dashboard.view") }, async (request, reply) => {
     const parsed = overviewQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -43,11 +43,13 @@ export async function dashboardRoutes(app: FastifyInstance) {
     const to = parsed.data.to ?? new Date();
     const from = parsed.data.from ?? new Date(to.getTime() - 30 * DAY_MS);
     const pipelineId = parsed.data.pipelineId;
+    // Sem dashboard.view_team, o dashboard mostra só o que é do usuário.
+    const mine = hasPermission(request, "dashboard.view_team") ? {} : { assignedUserId: request.auth.sub };
 
     const [dealsInRange, openDealsCurrent, pipelines, conversationsInRange, messagesInRange, customFieldDefinitions, overdueTasks, stageHistory] =
       await Promise.all([
         prisma.deal.findMany({
-          where: { tenantId, createdAt: { gte: from, lte: to }, ...(pipelineId ? { pipelineId } : {}) },
+          where: { tenantId, ...mine, createdAt: { gte: from, lte: to }, ...(pipelineId ? { pipelineId } : {}) },
           include: {
             tags: { include: { tag: true } },
             stage: true,
@@ -56,7 +58,7 @@ export async function dashboardRoutes(app: FastifyInstance) {
           },
         }),
         prisma.deal.findMany({
-          where: { tenantId, status: "open", ...(pipelineId ? { pipelineId } : {}) },
+          where: { tenantId, ...mine, status: "open", ...(pipelineId ? { pipelineId } : {}) },
           select: { stageId: true, pipelineId: true, valueCents: true },
         }),
         prisma.pipeline.findMany({
@@ -64,17 +66,17 @@ export async function dashboardRoutes(app: FastifyInstance) {
           include: { stages: { orderBy: { order: "asc" } } },
         }),
         prisma.conversation.findMany({
-          where: { tenantId, createdAt: { gte: from, lte: to } },
+          where: { tenantId, ...mine, createdAt: { gte: from, lte: to } },
           select: { createdAt: true },
         }),
         prisma.message.findMany({
-          where: { tenantId, createdAt: { gte: from, lte: to } },
+          where: { tenantId, createdAt: { gte: from, lte: to }, ...(mine.assignedUserId ? { conversation: mine } : {}) },
           select: { direction: true },
         }),
         prisma.dealCustomFieldDefinition.findMany({ where: { tenantId }, orderBy: { order: "asc" } }),
-        prisma.task.count({ where: { tenantId, status: "pending", dueAt: { lt: new Date() } } }),
+        prisma.task.count({ where: { tenantId, ...mine, status: "pending", dueAt: { lt: new Date() } } }),
         prisma.dealStageHistory.findMany({
-          where: { deal: { tenantId, ...(pipelineId ? { pipelineId } : {}) } },
+          where: { deal: { tenantId, ...mine, ...(pipelineId ? { pipelineId } : {}) } },
           orderBy: [{ dealId: "asc" }, { movedAt: "asc" }],
           select: { dealId: true, toStageId: true, movedAt: true },
         }),
@@ -263,7 +265,7 @@ export async function dashboardRoutes(app: FastifyInstance) {
 
   // Mesmos filtros do /dashboard/overview, só que em CSV pra abrir em
   // planilha — é o "relatório" que dá pra levar pra fora do CRM.
-  app.get("/dashboard/export.csv", async (request, reply) => {
+  app.get("/dashboard/export.csv", { preHandler: requirePermission("data.export") }, async (request, reply) => {
     const parsed = overviewQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -273,8 +275,9 @@ export async function dashboardRoutes(app: FastifyInstance) {
     const from = parsed.data.from ?? new Date(to.getTime() - 30 * DAY_MS);
     const pipelineId = parsed.data.pipelineId;
 
+    const mine = hasPermission(request, "dashboard.view_team") ? {} : { assignedUserId: request.auth.sub };
     const deals = await prisma.deal.findMany({
-      where: { tenantId, createdAt: { gte: from, lte: to }, ...(pipelineId ? { pipelineId } : {}) },
+      where: { tenantId, ...mine, createdAt: { gte: from, lte: to }, ...(pipelineId ? { pipelineId } : {}) },
       include: { contact: true, stage: true, pipeline: true, assignedUser: true },
       orderBy: { createdAt: "desc" },
     });

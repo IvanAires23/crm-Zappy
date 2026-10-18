@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, canAssignTo, ownWorkScope } from "../auth/auth.plugin.js";
 import { emitAutomationEvent } from "../automation/emit.js";
 import { createTask, deleteTask, setTaskStatus, updateTask } from "./taskService.js";
 
@@ -56,6 +56,9 @@ export async function tasksRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
+    if (!canAssignTo(request, parsed.data.assignedUserId)) {
+      return reply.status(403).send({ error: "Você não tem permissão para atribuir a outra pessoa" });
+    }
     const tenantId = request.auth.tenantId;
     let { contactId, dealId, conversationId } = parsed.data;
 
@@ -89,6 +92,7 @@ export async function tasksRoutes(app: FastifyInstance) {
 
     const where = {
       tenantId,
+      ...ownWorkScope(request),
       ...(contactId ? { contactId } : {}),
       ...(dealId ? { dealId } : {}),
       ...(conversationId ? { conversationId } : {}),
@@ -122,7 +126,7 @@ export async function tasksRoutes(app: FastifyInstance) {
     const tenantId = request.auth.tenantId;
 
     const task = await prisma.task.findFirst({
-      where: { id, tenantId },
+      where: { id, tenantId, ...ownWorkScope(request) },
       include: {
         contact: { select: { id: true, name: true, phone: true } },
         deal: { select: { id: true, title: true } },
@@ -142,8 +146,11 @@ export async function tasksRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
+    if (!canAssignTo(request, parsed.data.assignedUserId)) {
+      return reply.status(403).send({ error: "Você não tem permissão para atribuir a outra pessoa" });
+    }
 
-    const existing = await prisma.task.findFirst({ where: { id, tenantId } });
+    const existing = await prisma.task.findFirst({ where: { id, tenantId, ...ownWorkScope(request) } });
     if (!existing) return reply.status(404).send({ error: "Task não encontrada" });
 
     if (parsed.data.conversationId) {
@@ -173,7 +180,7 @@ export async function tasksRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
 
-    const existing = await prisma.task.findFirst({ where: { id, tenantId } });
+    const existing = await prisma.task.findFirst({ where: { id, tenantId, ...ownWorkScope(request) } });
     if (!existing) return reply.status(404).send({ error: "Task não encontrada" });
 
     const { status } = parsed.data;
@@ -196,7 +203,7 @@ export async function tasksRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
-    const existing = await prisma.task.findFirst({ where: { id, tenantId } });
+    const existing = await prisma.task.findFirst({ where: { id, tenantId, ...ownWorkScope(request) } });
     if (!existing) return reply.status(404).send({ error: "Task não encontrada" });
 
     await deleteTask(id);

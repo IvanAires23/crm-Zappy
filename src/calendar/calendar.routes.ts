@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, canAssignTo, ownWorkScope } from "../auth/auth.plugin.js";
 import { deleteGoogleEventForCalendarEvent, syncCalendarEventToGoogle } from "../integrations/googleCalendar/googleCalendarSync.js";
 
 // Eventos gerados a partir de uma Task (ver taskService) espelham o
@@ -68,6 +68,9 @@ export async function calendarRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
+    if (!canAssignTo(request, parsed.data.assignedUserId)) {
+      return reply.status(403).send({ error: "Você não tem permissão para atribuir a outra pessoa" });
+    }
     const tenantId = request.auth.tenantId;
     const { contactId, dealId } = parsed.data;
 
@@ -102,6 +105,7 @@ export async function calendarRoutes(app: FastifyInstance) {
 
     const where = {
       tenantId,
+      ...ownWorkScope(request),
       ...(from ? { endAt: { gte: from } } : {}),
       ...(to ? { startAt: { lte: to } } : {}),
       ...(contactId ? { contactId } : {}),
@@ -128,7 +132,7 @@ export async function calendarRoutes(app: FastifyInstance) {
     const tenantId = request.auth.tenantId;
 
     const event = await prisma.calendarEvent.findFirst({
-      where: { id, tenantId },
+      where: { id, tenantId, ...ownWorkScope(request) },
       include: {
         contact: { select: { id: true, name: true, phone: true } },
         deal: { select: { id: true, title: true } },
@@ -148,8 +152,11 @@ export async function calendarRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
+    if (!canAssignTo(request, parsed.data.assignedUserId)) {
+      return reply.status(403).send({ error: "Você não tem permissão para atribuir a outra pessoa" });
+    }
 
-    const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId } });
+    const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId, ...ownWorkScope(request) } });
     if (!existing) return reply.status(404).send({ error: "Evento não encontrado" });
     if (existing.taskId) return reply.status(400).send(TASK_LINKED_ERROR);
 
@@ -182,7 +189,7 @@ export async function calendarRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
 
-    const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId } });
+    const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId, ...ownWorkScope(request) } });
     if (!existing) return reply.status(404).send({ error: "Evento não encontrado" });
     if (existing.taskId) return reply.status(400).send(TASK_LINKED_ERROR);
 
@@ -199,7 +206,7 @@ export async function calendarRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
-    const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId } });
+    const existing = await prisma.calendarEvent.findFirst({ where: { id, tenantId, ...ownWorkScope(request) } });
     if (!existing) return reply.status(404).send({ error: "Evento não encontrado" });
     if (existing.taskId) return reply.status(400).send(TASK_LINKED_ERROR);
 

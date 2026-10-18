@@ -1,6 +1,8 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
+import { prisma } from "../db/prisma.js";
+import { resolvePermissions } from "./permissions.js";
 
 export interface AuthPayload {
   sub: string;
@@ -8,10 +10,43 @@ export interface AuthPayload {
   role: string;
 }
 
+export interface RequestAuth extends AuthPayload {
+  permissions: Set<string>;
+}
+
 declare module "fastify" {
   interface FastifyRequest {
-    auth: AuthPayload;
+    auth: RequestAuth;
   }
+}
+
+// O papel e as permissões vêm do banco a cada request, não do JWT: assim
+// desativar um usuário ou mudar as permissões dele vale na hora, sem
+// esperar o access token (1h) expirar.
+async function loadAuth(token: string, reply: FastifyReply): Promise<RequestAuth | null> {
+  let payload: AuthPayload;
+  try {
+    payload = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
+  } catch {
+    reply.status(401).send({ error: "Token inválido ou expirado" });
+    return null;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: payload.sub },
+    select: { tenantId: true, role: true, permissions: true, active: true },
+  });
+  if (!user || !user.active || user.tenantId !== payload.tenantId) {
+    reply.status(401).send({ error: "Usuário desativado ou sem acesso a esta conta" });
+    return null;
+  }
+
+  return {
+    sub: payload.sub,
+    tenantId: user.tenantId,
+    role: user.role,
+    permissions: resolvePermissions(user.role, user.permissions),
+  };
 }
 
 export async function authenticate(request: FastifyRequest, reply: FastifyReply) {
@@ -22,20 +57,31 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     return reply.status(401).send({ error: "Token ausente" });
   }
 
-  try {
-    request.auth = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
-  } catch {
-    return reply.status(401).send({ error: "Token inválido ou expirado" });
-  }
+  const auth = await loadAuth(token, reply);
+  if (auth) request.auth = auth;
 }
 
-// Restringe uma rota a papéis específicos — precisa vir DEPOIS de
-// authenticate no preHandler (usa request.auth.role). Primeiro uso real:
-// gestão de usuários (só admin cria/edita/desativa atendente).
-export function requireRole(...roles: string[]) {
-  return async function checkRole(request: FastifyRequest, reply: FastifyReply) {
-    if (!roles.includes(request.auth.role)) {
-      return reply.status(403).send({ error: "Sem permissão pra essa ação" });
+export function hasPermission(request: FastifyRequest, key: string): boolean {
+  return request.auth.permissions.has(key);
+}
+
+// preHandler de rota: exige TODAS as permissões listadas. Precisa vir
+// depois de authenticate.
+export function requirePermission(...keys: string[]) {
+  return async function checkPermission(request: FastifyRequest, reply: FastifyReply) {
+    const missing = keys.find((k) => !request.auth.permissions.has(k));
+    if (missing) {
+      return reply.status(403).send({ error: "Você não tem permissão para esta ação" });
+    }
+  };
+}
+
+// Variante "qualquer uma" — pra rotas usadas por mais de uma tela (ex:
+// detalhe do contato abre tanto pela conversa quanto pela lista de contatos).
+export function requireAnyPermission(...keys: string[]) {
+  return async function checkAnyPermission(request: FastifyRequest, reply: FastifyReply) {
+    if (!keys.some((k) => request.auth.permissions.has(k))) {
+      return reply.status(403).send({ error: "Você não tem permissão para esta ação" });
     }
   };
 }
@@ -53,9 +99,32 @@ export async function authenticateFromHeaderOrQuery(request: FastifyRequest, rep
     return reply.status(401).send({ error: "Token ausente" });
   }
 
-  try {
-    request.auth = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
-  } catch {
-    return reply.status(401).send({ error: "Token inválido ou expirado" });
-  }
+  const auth = await loadAuth(token, reply);
+  if (auth) request.auth = auth;
+}
+
+// Filtros de escopo "só o que é dele" — viram parte do `where` do Prisma.
+export function conversationScope(request: FastifyRequest) {
+  return request.auth.permissions.has("conversations.only_assigned")
+    ? { OR: [{ assignedUserId: request.auth.sub }, { assignedUserId: null }] }
+    : {};
+}
+
+export function dealScope(request: FastifyRequest) {
+  return request.auth.permissions.has("deals.only_assigned")
+    ? { OR: [{ assignedUserId: request.auth.sub }, { assignedUserId: null }] }
+    : {};
+}
+
+export function ownWorkScope(request: FastifyRequest) {
+  return request.auth.permissions.has("tasks.view_all")
+    ? {}
+    : { OR: [{ assignedUserId: request.auth.sub }, { assignedUserId: null }] };
+}
+
+// Atribuir tarefa/evento a outra pessoa exige tasks.assign_others; deixar
+// sem responsável ou atribuir a si mesmo é sempre permitido.
+export function canAssignTo(request: FastifyRequest, assignedUserId: string | null | undefined): boolean {
+  if (!assignedUserId || assignedUserId === request.auth.sub) return true;
+  return request.auth.permissions.has("tasks.assign_others");
 }

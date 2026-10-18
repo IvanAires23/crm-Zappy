@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 
 export const actionSchema = z.discriminatedUnion("type", [
   z.object({
@@ -112,11 +112,11 @@ const EVENT_CATALOG = [
 export async function automationRulesRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
 
-  app.get("/automation/events", async (_request, reply) => {
+  app.get("/automation/events", { preHandler: requirePermission("automations.view") }, async (_request, reply) => {
     return reply.send(EVENT_CATALOG);
   });
 
-  app.post("/automation/rules", async (request, reply) => {
+  app.post("/automation/rules", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const parsed = createRuleSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -137,7 +137,7 @@ export async function automationRulesRoutes(app: FastifyInstance) {
     return reply.status(201).send(rule);
   });
 
-  app.get("/automation/rules", async (request, reply) => {
+  app.get("/automation/rules", { preHandler: requirePermission("automations.view") }, async (request, reply) => {
     const tenantId = request.auth.tenantId;
 
     const rules = await prisma.automationRule.findMany({
@@ -148,7 +148,7 @@ export async function automationRulesRoutes(app: FastifyInstance) {
     return reply.send(rules);
   });
 
-  app.get("/automation/rules/:id", async (request, reply) => {
+  app.get("/automation/rules/:id", { preHandler: requirePermission("automations.view") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -158,7 +158,7 @@ export async function automationRulesRoutes(app: FastifyInstance) {
     return reply.send(rule);
   });
 
-  app.patch("/automation/rules/:id", async (request, reply) => {
+  app.patch("/automation/rules/:id", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -187,7 +187,7 @@ export async function automationRulesRoutes(app: FastifyInstance) {
     return reply.send(rule);
   });
 
-  app.delete("/automation/rules/:id", async (request, reply) => {
+  app.delete("/automation/rules/:id", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -204,7 +204,7 @@ export async function automationRulesRoutes(app: FastifyInstance) {
 
   // Histórico de execuções — pra debugar sem adivinhar se a regra rodou
   // e o que ela fez.
-  app.get("/automation/rules/:id/runs", async (request, reply) => {
+  app.get("/automation/rules/:id/runs", { preHandler: requirePermission("automations.view") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 

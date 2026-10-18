@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 
 function firstZodMessage(error: z.ZodError): string {
   return error.issues[0]?.message ?? "Dados inválidos";
@@ -23,7 +23,7 @@ const updateRuleSchema = z.object({
 export async function chatbotRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
 
-  app.get("/chatbot-rules", async (request, reply) => {
+  app.get("/chatbot-rules", { preHandler: requirePermission("chatbot.manage") }, async (request, reply) => {
     const rules = await prisma.chatbotRule.findMany({
       where: { tenantId: request.auth.tenantId },
       orderBy: { keyword: "asc" },
@@ -31,7 +31,7 @@ export async function chatbotRoutes(app: FastifyInstance) {
     return reply.send(rules);
   });
 
-  app.post("/chatbot-rules", async (request, reply) => {
+  app.post("/chatbot-rules", { preHandler: requirePermission("chatbot.manage") }, async (request, reply) => {
     const parsed = createRuleSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: firstZodMessage(parsed.error) });
@@ -43,7 +43,7 @@ export async function chatbotRoutes(app: FastifyInstance) {
     return reply.status(201).send(rule);
   });
 
-  app.patch("/chatbot-rules/:id", async (request, reply) => {
+  app.patch("/chatbot-rules/:id", { preHandler: requirePermission("chatbot.manage") }, async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     if (!params.success) {
       return reply.status(400).send({ error: firstZodMessage(params.error) });
@@ -62,7 +62,7 @@ export async function chatbotRoutes(app: FastifyInstance) {
     return reply.send(rule);
   });
 
-  app.delete("/chatbot-rules/:id", async (request, reply) => {
+  app.delete("/chatbot-rules/:id", { preHandler: requirePermission("chatbot.manage") }, async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     if (!params.success) {
       return reply.status(400).send({ error: firstZodMessage(params.error) });

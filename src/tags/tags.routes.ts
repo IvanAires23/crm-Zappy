@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db/prisma.js";
-import { authenticate } from "../auth/auth.plugin.js";
+import { authenticate, requireAnyPermission, requirePermission } from "../auth/auth.plugin.js";
 import { slugifyTagName } from "./slugify.js";
 
 const createTagSchema = z.object({
@@ -17,7 +17,7 @@ const updateTagSchema = z.object({
 export async function tagsRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authenticate);
 
-  app.post("/tags", async (request, reply) => {
+  app.post("/tags", { preHandler: requireAnyPermission("tags.manage", "contacts.edit", "deals.edit") }, async (request, reply) => {
     const parsed = createTagSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -50,7 +50,7 @@ export async function tagsRoutes(app: FastifyInstance) {
     return reply.send(tags);
   });
 
-  app.patch("/tags/:id", async (request, reply) => {
+  app.patch("/tags/:id", { preHandler: requirePermission("tags.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
@@ -83,7 +83,7 @@ export async function tagsRoutes(app: FastifyInstance) {
 
   // Deleta a tag e desanexa de todo mundo — tag é só rótulo, não tem
   // histórico a preservar (diferente de estágio de pipeline).
-  app.delete("/tags/:id", async (request, reply) => {
+  app.delete("/tags/:id", { preHandler: requirePermission("tags.manage") }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const tenantId = request.auth.tenantId;
 
