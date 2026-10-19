@@ -51,7 +51,11 @@ function extractMessagePreview(message: { direction: string; type: string; conte
   if (!content) return null;
 
   if (message.direction === "outbound") {
-    return typeof content.text === "string" ? content.text : `[${message.type}]`;
+    if (typeof content.text === "string") return content.text;
+    // Mandada pelo próprio celular (eco da Cloud API / Baileys antigo):
+    // formato da Graph API, { text: { body } }.
+    const echoed = (content.text as { body?: string } | undefined)?.body;
+    return echoed ?? `[${message.type}]`;
   }
 
   if (message.type === "text") {

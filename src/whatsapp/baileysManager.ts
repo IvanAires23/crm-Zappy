@@ -124,6 +124,66 @@ function extractText(message: any): string | undefined {
   return content?.conversation ?? content?.extendedTextMessage?.text ?? undefined;
 }
 
+// Junto com as mensagens de verdade o WhatsApp manda mensagens "de
+// controle" (troca de chaves, aviso de mensagem temporária, edição,
+// reação...) — principalmente nas que o dono do número manda pelo celular.
+// Gravar essas virava bolha vazia/"[unsupported]" na conversa.
+const CONTROL_MESSAGE_KEYS = new Set([
+  "protocolMessage",
+  "senderKeyDistributionMessage",
+  "messageContextInfo",
+  "reactionMessage",
+  "pollUpdateMessage",
+  "keepInChatMessage",
+  "pinInChatMessage",
+]);
+
+function hasVisibleContent(message: any): boolean {
+  const content = normalizeMessageContent(message) as Record<string, unknown> | undefined;
+  if (!content) return false; // stub/mensagem que não deu pra descriptografar
+  return Object.keys(content).some((key) => content[key] != null && !CONTROL_MESSAGE_KEYS.has(key));
+}
+
+function contactPhoneFromJid(jid: string | undefined, alt: string | undefined): string | null {
+  if (!jid) return null;
+  if (jid.endsWith("@s.whatsapp.net")) return jidToPhone(jid);
+  if (alt?.endsWith("@s.whatsapp.net")) return jidToPhone(alt);
+  return null;
+}
+
+// Nome salvo na agenda do celular conectado (sincronizado pelo WhatsApp)
+// vale mais que o nome de perfil do contato; o de perfil só preenche quem
+// ainda está sem nome. Só atualiza contatos que já existem no CRM — a
+// agenda inteira do celular não vira contato.
+async function syncContactNames(tenantId: string, contacts: any[]) {
+  for (const c of contacts) {
+    const phone = contactPhoneFromJid(c.id, c.phoneNumber);
+    if (!phone) continue;
+    const savedName: string | undefined = c.name || undefined;
+    const profileName: string | undefined = c.verifiedName || c.notify || undefined;
+    if (savedName) {
+      await prisma.contact.updateMany({ where: { tenantId, phone }, data: { name: savedName } });
+    } else if (profileName) {
+      await prisma.contact.updateMany({ where: { tenantId, phone, name: null }, data: { name: profileName } });
+    }
+  }
+}
+
+// Correção dos contatos que ficaram com o nome do próprio dono do número:
+// até 19/10/2026 o pushName das mensagens mandadas pelo celular (que é o
+// nome de quem mandou, ou seja, o dono) sobrescrevia o nome do contato.
+// Volta pra sem nome — a próxima mensagem do cliente ou a sincronização da
+// agenda preenche o nome certo.
+async function clearOwnNameFromContacts(tenantId: string, sock: WASocket) {
+  const ownName = sock.user?.name ?? sock.authState.creds.me?.name;
+  const ownPhone = sock.user?.id ? jidToPhone(sock.user.id) : undefined;
+  if (!ownName) return;
+  await prisma.contact.updateMany({
+    where: { tenantId, name: ownName, ...(ownPhone ? { phone: { not: ownPhone } } : {}) },
+    data: { name: null },
+  });
+}
+
 async function ingestIncoming(tenantId: string, msg: any) {
   const remoteJid: string | undefined = msg.key?.remoteJid;
   // Grupos ("...@g.us") e broadcasts ficam fora do escopo do CRM (que é
@@ -138,13 +198,22 @@ async function ingestIncoming(tenantId: string, msg: any) {
   // vez que a Meta decide endereçar a conversa como LID.
   const phoneJid = remoteJid.endsWith("@lid") && msg.key?.remoteJidAlt ? msg.key.remoteJidAlt : remoteJid;
   const phone = jidToPhone(phoneJid);
+  if (!hasVisibleContent(msg.message)) return;
+  // Mesmo id já gravado (ex: reentrega do WhatsApp) — não duplica.
+  if (msg.key.id && (await prisma.message.findUnique({ where: { whatsappMessageId: msg.key.id }, select: { id: true } }))) {
+    return;
+  }
   const text = extractText(msg.message);
-  const direction = msg.key.fromMe ? "outbound" : "inbound";
+  const fromMe = !!msg.key.fromMe;
+  const direction = fromMe ? "outbound" : "inbound";
 
+  // Em mensagem mandada pelo próprio celular (fromMe) o pushName é o nome
+  // do DONO do número, não do contato — usar ele renomeava o contato.
+  const profileName: string | undefined = fromMe ? undefined : msg.pushName || msg.verifiedBizName || undefined;
   const contact = await prisma.contact.upsert({
     where: { tenantId_phone: { tenantId, phone } },
-    create: { tenantId, phone, name: msg.pushName ?? undefined },
-    update: msg.pushName ? { name: msg.pushName } : {},
+    create: { tenantId, phone, name: profileName },
+    update: profileName ? { name: profileName } : {},
   });
 
   const conversation = await findOrCreateOpenConversation(tenantId, contact.id);
@@ -155,15 +224,19 @@ async function ingestIncoming(tenantId: string, msg: any) {
       conversationId: conversation.id,
       direction,
       type: text ? "text" : "unsupported",
-      // Mesmo formato { text: { body } } usado pela Cloud API — o front lê
-      // esse shape independente de qual provider gerou a mensagem.
-      content: text ? { text: { body: text } } : { raw: "mídia ou tipo não suportado ainda" },
+      // Saída usa o mesmo formato das mensagens mandadas pelo CRM
+      // ({ text }); entrada, o da Cloud API ({ text: { body } }).
+      content: text
+        ? fromMe
+          ? { text }
+          : { text: { body: text } }
+        : { raw: "mídia ou tipo não suportado ainda" },
       whatsappMessageId: msg.key.id ?? undefined,
       status: direction === "inbound" ? "delivered" : "sent",
       // "business_app" é reaproveitado aqui pro mesmo sentido que já tem na
       // coexistência da Cloud API: mensagem mandada pelo próprio celular,
       // fora do CRM, mas que precisa aparecer na conversa.
-      source: msg.key.fromMe ? "business_app" : "api",
+      source: fromMe ? "business_app" : "api",
     },
   });
 
@@ -251,6 +324,9 @@ async function startSession(tenantId: string): Promise<void> {
       });
       await publishRealtimeEvent({ tenantId, event: "whatsapp:connected", data: { displayPhoneNumber } });
       logger.info({ tenantId }, "Sessão Baileys conectada");
+      await clearOwnNameFromContacts(tenantId, sock).catch((err) =>
+        logger.error({ tenantId, err }, "Falha ao corrigir nomes de contato")
+      );
     }
 
     if (connection === "close") {
@@ -294,6 +370,17 @@ async function startSession(tenantId: string): Promise<void> {
         }, RECONNECT_DELAY_MS);
       }
     }
+  });
+
+  sock.ev.on("contacts.upsert", (contacts) => {
+    syncContactNames(tenantId, contacts).catch((err) =>
+      logger.error({ tenantId, err }, "Falha ao sincronizar nomes de contato")
+    );
+  });
+  sock.ev.on("contacts.update", (contacts) => {
+    syncContactNames(tenantId, contacts).catch((err) =>
+      logger.error({ tenantId, err }, "Falha ao sincronizar nomes de contato")
+    );
   });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
