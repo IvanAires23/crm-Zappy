@@ -254,6 +254,13 @@ trás, porque a diferença fica isolada em `src/whatsapp/client.ts`.
   providers gravam `Contact.phone` no mesmo formato (dígitos, sem `+`,
   igual ao `msg.from` que a Cloud API manda), então o mesmo contato aparece
   unificado na tela de Conversas independente de qual provider o tenant usa.
+- **Conexão oficial manual** (`POST /onboarding/whatsapp/manual`): token
+  de usuário do sistema + WABA, sem o popup. Existe porque o Embedded
+  Signup recusa WABA do mesmo portfólio dono do app (tenta compartilhar a
+  conta consigo mesmo → "<id do portfólio> não é uma identificação
+  válida", #1690130). Usa a mesma etapa final do popup
+  (`finalizeCloudApiConnection`), que também desativa e desloga a sessão
+  Baileys do tenant ao conectar a oficial.
 - **Limitação conhecida**: um tenant pode acabar com duas linhas em
   `TenantWhatsappAccount` (uma `cloud_api`, uma `baileys`) se conectar as
   duas em momentos diferentes — `/onboarding/whatsapp/status` usa
