@@ -5,8 +5,28 @@ import { initSentry, Sentry } from "../config/sentry.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import { emitAutomationEvent } from "../automation/emit.js";
 import pino from "pino";
+import type { Prisma } from "@prisma/client";
 
 initSentry();
+
+// O worker roda com concurrency 10: dois eventos da mesma pessoa (ou dois
+// lotes de histórico que repetem as mesmas mensagens) chegam juntos e o
+// segundo create/upsert estoura P2002 na constraint única. O dado já está
+// gravado pelo outro job, então é seguro tratar como "já existe".
+function isUniqueViolation(err: unknown): boolean {
+  return (err as { code?: string })?.code === "P2002";
+}
+
+// upsert do Prisma não é atômico (select + insert): na corrida, a segunda
+// chamada tenta inserir e falha. Repetir cai no caminho do update.
+async function upsertContact(args: Prisma.ContactUpsertArgs) {
+  try {
+    return await prisma.contact.upsert(args);
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    return prisma.contact.upsert(args);
+  }
+}
 
 const logger = pino({ transport: { target: "pino-pretty" } });
 
@@ -104,7 +124,7 @@ async function handleInboundMessage(
   const fromPhone: string = msg.from; // já vem em formato internacional
   const contactName: string | undefined = value.contacts?.[0]?.profile?.name;
 
-  const contact = await prisma.contact.upsert({
+  const contact = await upsertContact({
     where: { tenantId_phone: { tenantId, phone: fromPhone } },
     create: { tenantId, phone: fromPhone, name: contactName },
     update: contactName ? { name: contactName } : {},
@@ -120,17 +140,25 @@ async function handleInboundMessage(
     });
   }
 
-  const message = await prisma.message.create({
-    data: {
-      tenantId,
-      conversationId: conversation.id,
-      direction: "inbound",
-      type: msg.type,
-      content: msg,
-      whatsappMessageId: msg.id,
-      status: "delivered",
-    },
-  });
+  let message;
+  try {
+    message = await prisma.message.create({
+      data: {
+        tenantId,
+        conversationId: conversation.id,
+        direction: "inbound",
+        type: msg.type,
+        content: msg,
+        whatsappMessageId: msg.id,
+        status: "delivered",
+      },
+    });
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    // Outra entrega da mesma mensagem já gravou (a Meta reenvia).
+    await prisma.webhookEvent.update({ where: { whatsappEventKey: eventKey }, data: { processedAt: new Date() } });
+    return;
+  }
 
   const now = new Date();
   await prisma.conversation.update({
@@ -264,7 +292,7 @@ async function handleAppStateSync(tenantId: string, item: any) {
 
   const name: string | undefined = item.contact?.full_name ?? item.contact?.first_name;
 
-  await prisma.contact.upsert({
+  await upsertContact({
     where: { tenantId_phone: { tenantId, phone } },
     create: { tenantId, phone, name },
     update: name ? { name } : {},
@@ -288,7 +316,7 @@ async function handleMessageEcho(tenantId: string, phoneNumberId: string, echo: 
 
   const toPhone: string = echo.to;
 
-  const contact = await prisma.contact.upsert({
+  const contact = await upsertContact({
     where: { tenantId_phone: { tenantId, phone: toPhone } },
     create: { tenantId, phone: toPhone },
     update: {},
@@ -296,18 +324,25 @@ async function handleMessageEcho(tenantId: string, phoneNumberId: string, echo: 
 
   const conversation = await findOrCreateOpenConversation(tenantId, contact.id);
 
-  const message = await prisma.message.create({
-    data: {
-      tenantId,
-      conversationId: conversation.id,
-      direction: "outbound",
-      type: echo.type,
-      content: echo,
-      whatsappMessageId: echo.id,
-      status: "sent",
-      source: "business_app",
-    },
-  });
+  let message;
+  try {
+    message = await prisma.message.create({
+      data: {
+        tenantId,
+        conversationId: conversation.id,
+        direction: "outbound",
+        type: echo.type,
+        content: echo,
+        whatsappMessageId: echo.id,
+        status: "sent",
+        source: "business_app",
+      },
+    });
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    await prisma.webhookEvent.update({ where: { whatsappEventKey: eventKey }, data: { processedAt: new Date() } });
+    return;
+  }
 
   await prisma.conversation.update({
     where: { id: conversation.id },
@@ -363,7 +398,7 @@ async function handleHistorySync(tenantId: string, phoneNumberId: string, histor
       const phone: string | undefined = thread.id ?? thread.phone_number;
       if (!phone) continue;
 
-      const contact = await prisma.contact.upsert({
+      const contact = await upsertContact({
         where: { tenantId_phone: { tenantId, phone } },
         create: { tenantId, phone },
         update: {},
@@ -377,26 +412,40 @@ async function handleHistorySync(tenantId: string, phoneNumberId: string, histor
         // whatsappMessageId é único: mensagens recentes (já recebidas por
         // webhook ou echo) também vêm no histórico. Sem pular, o create
         // estourava P2002 e o lote inteiro falhava em todas as tentativas.
+        // "errors" = tipo que a Meta não conseguiu exportar (131051) — não
+        // tem conteúdo nenhum pra mostrar.
+        if (msg.type === "errors") continue;
+
         const already = await prisma.message.findUnique({ where: { whatsappMessageId: msg.id } });
         if (already) continue;
 
         const sentAt = msg.timestamp ? new Date(Number(msg.timestamp) * 1000) : new Date();
+        const fromMe = msg.history_context?.from_me === true || msg.from !== phone;
+        // history_context.status de mensagem recebida vem "pending"/"played"
+        // (estado de leitura no celular) — não é status de entrega nosso.
+        const status = fromMe ? (msg.history_context?.status?.toLowerCase?.() ?? "delivered") : "delivered";
 
-        await prisma.message.create({
-          data: {
-            tenantId,
-            conversationId: conversation.id,
-            direction: msg.from === phone ? "inbound" : "outbound",
-            type: msg.type ?? "unknown",
-            content: msg,
-            whatsappMessageId: msg.id,
-            status: msg.history_context?.status?.toLowerCase?.() ?? msg.status ?? "delivered",
-            source: "history_sync",
-            // Data real da mensagem, não a da importação — senão o histórico
-            // inteiro aparece como "agora" e fora de ordem.
-            createdAt: sentAt,
-          },
-        });
+        try {
+          await prisma.message.create({
+            data: {
+              tenantId,
+              conversationId: conversation.id,
+              direction: fromMe ? "outbound" : "inbound",
+              type: msg.type ?? "unknown",
+              content: msg,
+              whatsappMessageId: msg.id,
+              status,
+              source: "history_sync",
+              // Data real da mensagem, não a da importação — senão o histórico
+              // inteiro aparece como "agora" e fora de ordem.
+              createdAt: sentAt,
+            },
+          });
+        } catch (err) {
+          // Lotes diferentes repetem as mesmas mensagens e rodam em paralelo.
+          if (isUniqueViolation(err)) continue;
+          throw err;
+        }
         imported++;
         if (!latest || sentAt > latest) latest = sentAt;
       }
