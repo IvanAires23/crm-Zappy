@@ -37,6 +37,9 @@ async function main() {
 
   await webhookQueue.close();
   await connection.quit();
+  // queue.ts também abre um QueueEvents (conexão bloqueante própria) que
+  // seguraria o processo vivo.
+  process.exit(0);
 }
 
 main().catch(async (err) => {
