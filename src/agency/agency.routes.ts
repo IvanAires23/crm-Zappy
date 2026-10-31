@@ -102,7 +102,7 @@ async function serializeAccounts(where: Prisma.TenantWhereInput, homeTenantId: s
       whatsappAccounts: {
         select: { provider: true, displayPhoneNumber: true, baileysStatus: true },
         take: 1,
-        orderBy: { updatedAt: "desc" },
+        orderBy: { connectedAt: "desc" },
       },
     },
   });
