@@ -5,6 +5,7 @@ import { sendTextMessage, sendTemplateMessage, sendMediaMessage } from "../whats
 import { initSentry, Sentry } from "../config/sentry.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import pino from "pino";
+import { describeSendError } from "../whatsapp/errors.js";
 
 initSentry();
 
@@ -87,19 +88,25 @@ const worker = new Worker(
         throw err;
       }
 
+      const errorMessage = describeSendError(err);
       const failedMessage = await prisma.message.update({
         where: { id: messageId },
-        data: { status: "failed" },
+        data: { status: "failed", errorMessage },
       });
 
       await publishRealtimeEvent({
         tenantId,
         event: "message:status",
-        data: { conversationId: failedMessage.conversationId, messageId: failedMessage.id, status: failedMessage.status },
+        data: {
+          conversationId: failedMessage.conversationId,
+          messageId: failedMessage.id,
+          status: failedMessage.status,
+          errorMessage,
+        },
       });
 
       if (broadcastRecipientId) {
-        await updateBroadcastProgress(broadcastRecipientId, "failed", err instanceof Error ? err.message : String(err));
+        await updateBroadcastProgress(broadcastRecipientId, "failed", errorMessage);
       }
 
       logger.error({ tenantId, messageId, err }, "Falha ao enviar mensagem definitivamente");

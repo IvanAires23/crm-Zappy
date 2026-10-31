@@ -5,6 +5,7 @@ import { initSentry, Sentry } from "../config/sentry.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import { emitAutomationEvent } from "../automation/emit.js";
 import pino from "pino";
+import { describeMetaError } from "../whatsapp/errors.js";
 import type { Prisma } from "@prisma/client";
 
 initSentry();
@@ -261,15 +262,19 @@ async function handleStatusUpdate(tenantId: string, phoneNumberId: string, statu
   });
 
   if (existingMessage) {
+    // A Meta aceita o envio (200) e só depois avisa a falha por aqui, com o
+    // motivo em errors[] — ex: 131030 (app em modo de desenvolvimento) e
+    // 131042 (pagamento) chegam assim, não na resposta do envio.
+    const errorMessage = status.status === "failed" ? describeMetaError(status.errors?.[0]) : undefined;
     const updated = await prisma.message.update({
       where: { id: existingMessage.id },
-      data: { status: status.status }, // sent | delivered | read | failed
+      data: { status: status.status, ...(errorMessage ? { errorMessage } : {}) }, // sent | delivered | read | failed
     });
 
     await publishRealtimeEvent({
       tenantId,
       event: "message:status",
-      data: { conversationId: updated.conversationId, messageId: updated.id, status: updated.status },
+      data: { conversationId: updated.conversationId, messageId: updated.id, status: updated.status, errorMessage: updated.errorMessage },
     });
   }
 
