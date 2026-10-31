@@ -293,6 +293,10 @@ model Message {
   // history_sync (importada do histórico antigo no momento da coexistência)
   source            String   @default("api")
 
+  // Motivo legível da falha (status=failed): erro da Graph API no envio ou
+  // o errors[] do webhook de status. Sem isso a tela só mostrava um "!".
+  errorMessage      String?
+
   createdAt         DateTime @default(now())
 
   @@index([tenantId])
