@@ -11,6 +11,13 @@ const GRAPH_BASE = `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}`;
 // job pode ficar um instante na fila se o worker estiver ocupado.
 const UNOFFICIAL_SEND_TIMEOUT_MS = 30_000;
 
+// Um tenant pode ter duas linhas (cloud_api e baileys) se conectou as duas
+// em momentos diferentes. Vale a última conexão feita pelo usuário — sem
+// ordem, o findFirst devolvia qualquer uma (ex: a sessão Baileys antiga
+// escondia a conexão oficial recém-feita). Não usar updatedAt: o Baileys
+// regrava a linha a cada creds.update e sempre "ganharia".
+export const CURRENT_ACCOUNT_ORDER = { connectedAt: "desc" } as const;
+
 class WhatsappApiError extends Error {
   constructor(public status: number, public body: unknown) {
     super(`WhatsApp API error (${status})`);
@@ -20,6 +27,7 @@ class WhatsappApiError extends Error {
 async function getTenantAccount(tenantId: string) {
   const account = await prisma.tenantWhatsappAccount.findFirst({
     where: { tenantId, tokenStatus: "active" },
+    orderBy: CURRENT_ACCOUNT_ORDER,
   });
 
   if (!account) {
@@ -36,6 +44,7 @@ async function getTenantAccount(tenantId: string) {
 export async function getTenantProvider(tenantId: string): Promise<string | null> {
   const account = await prisma.tenantWhatsappAccount.findFirst({
     where: { tenantId, tokenStatus: "active" },
+    orderBy: CURRENT_ACCOUNT_ORDER,
   });
   return account?.provider ?? null;
 }

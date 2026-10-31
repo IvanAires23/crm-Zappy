@@ -4,7 +4,7 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { prisma } from "../db/prisma.js";
 import { decryptToken, encryptToken } from "../config/crypto.js";
-import { checkCoexistenceStatus, triggerSmbAppDataSync } from "../whatsapp/client.js";
+import { CURRENT_ACCOUNT_ORDER, checkCoexistenceStatus, triggerSmbAppDataSync } from "../whatsapp/client.js";
 import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 import { publishBaileysCommand } from "../whatsapp/baileysCommands.js";
 import { clearLastError, getLastError, getLatestQr, isWorkerOnline } from "../whatsapp/baileysRuntime.js";
@@ -88,6 +88,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
   app.get("/onboarding/whatsapp/status", async (request, reply) => {
     const account = await prisma.tenantWhatsappAccount.findFirst({
       where: { tenantId: request.auth.tenantId },
+      orderBy: CURRENT_ACCOUNT_ORDER,
     });
 
     if (!account) {
@@ -146,6 +147,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
         where: { id: existing.id },
         data: {
           baileysStatus: "connecting",
+          connectedAt: new Date(),
           // Credenciais de uma sessão deslogada pelo celular já não valem:
           // reaproveitá-las fecha a conexão com 401 antes de emitir QR.
           ...(existing.baileysStatus === "logged_out" ? { baileysAuthState: null } : {}),
@@ -293,6 +295,15 @@ export async function onboardingRoutes(app: FastifyInstance) {
       }
     }
 
+    // Número formatado + qualidade pro card "Conectado". Não bloqueia a
+    // conexão se falhar — é só exibição.
+    const infoRes = await graphFetch(
+      `${GRAPH_BASE}/${phoneNumberId}?fields=display_phone_number,quality_rating&access_token=${accessToken}`
+    ).catch(() => null);
+    const info = infoRes?.ok ? await infoRes.json().catch(() => ({})) : {};
+    const displayPhoneNumber: string | undefined = info?.display_phone_number;
+    const qualityRating: string | undefined = info?.quality_rating;
+
     // 5) Persistir, criptografando o token
     const account = await prisma.tenantWhatsappAccount.upsert({
       where: { phoneNumberId },
@@ -300,6 +311,8 @@ export async function onboardingRoutes(app: FastifyInstance) {
         tenantId,
         wabaId,
         phoneNumberId,
+        displayPhoneNumber,
+        qualityRating,
         accessTokenEncrypted: encryptToken(accessToken),
         twoStepPinEncrypted: isOnBizApp ? null : encryptToken(twoStepPin),
         tokenStatus: "active",
@@ -308,6 +321,11 @@ export async function onboardingRoutes(app: FastifyInstance) {
         historySyncStatus: isOnBizApp ? "pending" : null,
       },
       update: {
+        tenantId,
+        wabaId,
+        displayPhoneNumber,
+        qualityRating,
+        connectedAt: new Date(),
         accessTokenEncrypted: encryptToken(accessToken),
         twoStepPinEncrypted: isOnBizApp ? undefined : encryptToken(twoStepPin),
         tokenStatus: "active",
