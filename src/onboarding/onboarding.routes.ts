@@ -4,7 +4,12 @@ import { z } from "zod";
 import { env } from "../config/env.js";
 import { prisma } from "../db/prisma.js";
 import { decryptToken, encryptToken } from "../config/crypto.js";
-import { CURRENT_ACCOUNT_ORDER, checkCoexistenceStatus, triggerSmbAppDataSync } from "../whatsapp/client.js";
+import {
+  CURRENT_ACCOUNT_ORDER,
+  WhatsappApiError,
+  checkCoexistenceStatus,
+  triggerSmbAppDataSync,
+} from "../whatsapp/client.js";
 import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 import { publishBaileysCommand } from "../whatsapp/baileysCommands.js";
 import { clearLastError, getLastError, getLatestQr, isWorkerOnline } from "../whatsapp/baileysRuntime.js";
@@ -116,6 +121,7 @@ export async function onboardingRoutes(app: FastifyInstance) {
         qualityRating: account.qualityRating,
         tokenStatus: account.tokenStatus,
         isCoexistence: account.isCoexistence,
+        historySyncStatus: account.historySyncStatus,
         baileysStatus: account.baileysStatus,
       },
       baileys,
@@ -177,6 +183,56 @@ export async function onboardingRoutes(app: FastifyInstance) {
   app.post("/onboarding/whatsapp/unofficial/logout", { preHandler: requirePermission("whatsapp.manage") }, async (request, reply) => {
     await publishBaileysCommand({ tenantId: request.auth.tenantId, action: "logout" });
     return reply.status(202).send({ loggedOut: true });
+  });
+
+  // Pede de novo à Meta os contatos e o histórico do WhatsApp Business App
+  // (coexistência). O /complete já pede uma vez, mas se os campos
+  // history/smb_app_state_sync não estavam assinados no webhook nessa hora,
+  // a Meta manda e a gente perde — sem isso a única saída era reconectar.
+  // Os dados chegam depois, via webhook; aqui só disparamos o pedido.
+  app.post("/onboarding/whatsapp/sync-history", { preHandler: requirePermission("whatsapp.manage") }, async (request, reply) => {
+    const account = await prisma.tenantWhatsappAccount.findFirst({
+      where: { tenantId: request.auth.tenantId, provider: "cloud_api", tokenStatus: "active" },
+      orderBy: CURRENT_ACCOUNT_ORDER,
+    });
+    if (!account?.accessTokenEncrypted) {
+      return reply.status(400).send({ error: "Nenhuma conexão pela API oficial ativa nesta conta." });
+    }
+
+    const accessToken = decryptToken(account.accessTokenEncrypted);
+    try {
+      // Confere na hora: o isCoexistence salvo pode estar velho.
+      const { isOnBizApp } = await checkCoexistenceStatus(account.phoneNumberId, accessToken);
+      if (!isOnBizApp) {
+        await prisma.tenantWhatsappAccount.update({ where: { id: account.id }, data: { isCoexistence: false } });
+        return reply.status(400).send({
+          error:
+            "Este número não está em coexistência com o WhatsApp Business App do celular, " +
+            "então não há histórico do app para sincronizar.",
+        });
+      }
+
+      await triggerSmbAppDataSync(account.phoneNumberId, accessToken, "smb_app_state_sync");
+      await triggerSmbAppDataSync(account.phoneNumberId, accessToken, "history");
+    } catch (err) {
+      if (err instanceof WhatsappApiError) {
+        const body = err.body as any;
+        const detail = body?.error?.error_user_msg ?? body?.error?.message;
+        request.log.error({ body, phoneNumberId: account.phoneNumberId }, "Meta recusou a sincronização de histórico");
+        return reply.status(400).send({
+          error: `A Meta recusou a sincronização${detail ? `: ${detail}` : ""}. ` +
+            "Ela só aceita esse pedido por um tempo limitado depois da conexão do número.",
+        });
+      }
+      throw err;
+    }
+
+    await prisma.tenantWhatsappAccount.update({
+      where: { id: account.id },
+      data: { isCoexistence: true, historySyncStatus: "pending" },
+    });
+
+    return reply.status(202).send({ started: true });
   });
 
   // Chamado pelo frontend logo após o FB.login() do Embedded Signup retornar o `code`.
