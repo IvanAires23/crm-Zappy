@@ -328,73 +328,95 @@ async function handleMessageEcho(tenantId: string, phoneNumberId: string, echo: 
   logger.info({ tenantId, conversationId: conversation.id }, "Echo de mensagem do app processado");
 }
 
-// Coexistência: sincronização de histórico, disparada uma vez no onboarding
-// (ver triggerSmbAppDataSync em whatsapp/client.ts). O formato exato de
-// `history.threads` não está 100% documentado publicamente — este handler
-// guarda o payload cru pra inspeção e faz um melhor-esforço de importação;
-// vale conferir contra o payload real recebido em produção antes de confiar
-// cegamente nele.
+// Coexistência: sincronização de histórico (até ~6 meses), pedida no
+// onboarding ou pelo botão "Sincronizar histórico" (rota sync-history).
+// A Meta manda `value.history` como LISTA de lotes:
+//   [{ metadata: { phase, chunk_order, progress }, threads: [{ id, messages }] }]
+// ou [{ errors: [...] }] quando o usuário recusa no celular. O handler antigo
+// lia como objeto único, então nada era importado. Aceita os dois formatos.
 async function handleHistorySync(tenantId: string, phoneNumberId: string, history: any) {
-  if (history.errors) {
-    await prisma.tenantWhatsappAccount.update({
-      where: { phoneNumberId },
-      data: { historySyncStatus: "declined" },
-    });
-    logger.warn({ tenantId, errors: history.errors }, "Sincronização de histórico recusada pelo usuário no app");
-    return;
-  }
+  const chunks: any[] = Array.isArray(history) ? history : [history];
 
-  for (const thread of history.threads ?? []) {
-    const phone: string | undefined = thread.id ?? thread.phone_number;
-    if (!phone) continue;
+  for (const chunk of chunks) {
+    const meta = chunk?.metadata ?? {};
 
-    const contact = await prisma.contact.upsert({
-      where: { tenantId_phone: { tenantId, phone } },
-      create: { tenantId, phone },
-      update: {},
+    // Guarda o lote cru pra inspeção — o formato não é 100% documentado e
+    // um lote perdido não é reenviado pela Meta.
+    const rawKey = `history-raw:${phoneNumberId}:${meta.phase ?? "x"}:${meta.chunk_order ?? Date.now()}`;
+    await prisma.webhookEvent.upsert({
+      where: { whatsappEventKey: rawKey },
+      create: { tenantId, whatsappEventKey: rawKey, phoneNumberId, payload: chunk },
+      update: { payload: chunk },
     });
 
-    const conversation = await findOrCreateOpenConversation(tenantId, contact.id);
-
-    for (const msg of thread.messages ?? []) {
-      const eventKey = `history:${msg.id}`;
-      const existing = await prisma.webhookEvent.findUnique({ where: { whatsappEventKey: eventKey } });
-      if (existing?.processedAt) continue;
-
-      await prisma.webhookEvent.upsert({
-        where: { whatsappEventKey: eventKey },
-        create: { tenantId, whatsappEventKey: eventKey, phoneNumberId, payload: msg },
-        update: { payload: msg },
+    if (chunk?.errors) {
+      await prisma.tenantWhatsappAccount.update({
+        where: { phoneNumberId },
+        data: { historySyncStatus: "declined" },
       });
-
-      await prisma.message.create({
-        data: {
-          tenantId,
-          conversationId: conversation.id,
-          direction: msg.from === phone ? "inbound" : "outbound",
-          type: msg.type,
-          content: msg,
-          whatsappMessageId: msg.id,
-          status: msg.status ?? "delivered",
-          source: "history_sync",
-        },
-      });
-
-      await prisma.webhookEvent.update({
-        where: { whatsappEventKey: eventKey },
-        data: { processedAt: new Date() },
-      });
+      logger.warn({ tenantId, errors: chunk.errors }, "Sincronização de histórico recusada/falhou");
+      continue;
     }
-  }
 
-  if (history.progress === 100 || history.phase === 2) {
+    let imported = 0;
+    for (const thread of chunk?.threads ?? []) {
+      const phone: string | undefined = thread.id ?? thread.phone_number;
+      if (!phone) continue;
+
+      const contact = await prisma.contact.upsert({
+        where: { tenantId_phone: { tenantId, phone } },
+        create: { tenantId, phone },
+        update: {},
+      });
+
+      const conversation = await findOrCreateOpenConversation(tenantId, contact.id);
+      let latest: Date | null = null;
+
+      for (const msg of thread.messages ?? []) {
+        if (!msg?.id) continue;
+        // whatsappMessageId é único: mensagens recentes (já recebidas por
+        // webhook ou echo) também vêm no histórico. Sem pular, o create
+        // estourava P2002 e o lote inteiro falhava em todas as tentativas.
+        const already = await prisma.message.findUnique({ where: { whatsappMessageId: msg.id } });
+        if (already) continue;
+
+        const sentAt = msg.timestamp ? new Date(Number(msg.timestamp) * 1000) : new Date();
+
+        await prisma.message.create({
+          data: {
+            tenantId,
+            conversationId: conversation.id,
+            direction: msg.from === phone ? "inbound" : "outbound",
+            type: msg.type ?? "unknown",
+            content: msg,
+            whatsappMessageId: msg.id,
+            status: msg.history_context?.status?.toLowerCase?.() ?? msg.status ?? "delivered",
+            source: "history_sync",
+            // Data real da mensagem, não a da importação — senão o histórico
+            // inteiro aparece como "agora" e fora de ordem.
+            createdAt: sentAt,
+          },
+        });
+        imported++;
+        if (!latest || sentAt > latest) latest = sentAt;
+      }
+
+      if (latest && (!conversation.lastMessageAt || latest > conversation.lastMessageAt)) {
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: latest } });
+      }
+    }
+
+    const done = meta.progress === 100 || chunk?.progress === 100;
     await prisma.tenantWhatsappAccount.update({
       where: { phoneNumberId },
-      data: { historySyncStatus: "completed" },
+      data: { historySyncStatus: done ? "completed" : "in_progress" },
     });
-  }
 
-  logger.info({ tenantId, phoneNumberId }, "Lote de histórico (coexistência) processado");
+    logger.info(
+      { tenantId, phoneNumberId, phase: meta.phase, chunk: meta.chunk_order, progress: meta.progress, imported },
+      "Lote de histórico (coexistência) processado"
+    );
+  }
 }
 
 worker.on("failed", (job, err) => {
