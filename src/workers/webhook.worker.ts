@@ -58,6 +58,12 @@ const worker = new Worker(
           continue;
         }
 
+        // Desconectado pela tela (rota /onboarding/whatsapp/disconnect).
+        if (account.tokenStatus === "revoked") {
+          logger.info({ phoneNumberId }, "Evento ignorado: conexão oficial desconectada");
+          continue;
+        }
+
         // 2) Mensagens recebidas (inbound)
         for (const msg of value.messages ?? []) {
           await handleInboundMessage(account.tenantId, phoneNumberId, msg, value);

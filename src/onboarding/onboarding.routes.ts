@@ -112,7 +112,8 @@ export async function onboardingRoutes(app: FastifyInstance) {
         : null;
 
     return reply.send({
-      connected: account.provider === "baileys" ? account.baileysStatus === "connected" : true,
+      connected:
+        account.provider === "baileys" ? account.baileysStatus === "connected" : account.tokenStatus === "active",
       account: {
         provider: account.provider,
         phoneNumberId: account.phoneNumberId,
@@ -183,6 +184,44 @@ export async function onboardingRoutes(app: FastifyInstance) {
   app.post("/onboarding/whatsapp/unofficial/logout", { preHandler: requirePermission("whatsapp.manage") }, async (request, reply) => {
     await publishBaileysCommand({ tenantId: request.auth.tenantId, action: "logout" });
     return reply.status(202).send({ loggedOut: true });
+  });
+
+  // Desconecta a API oficial. A linha fica (com tokenStatus "revoked") pra
+  // reconexão pelo Embedded Signup reaproveitar o mesmo registro — o upsert
+  // do /complete volta o token pra "active". Conversas e mensagens não mudam.
+  app.post("/onboarding/whatsapp/disconnect", { preHandler: requirePermission("whatsapp.manage") }, async (request, reply) => {
+    const account = await prisma.tenantWhatsappAccount.findFirst({
+      where: { tenantId: request.auth.tenantId, provider: "cloud_api", tokenStatus: "active" },
+      orderBy: CURRENT_ACCOUNT_ORDER,
+    });
+    if (!account) {
+      return reply.status(400).send({ error: "Nenhuma conexão pela API oficial ativa nesta conta." });
+    }
+
+    // Tira o app dos webhooks da WABA pra Meta parar de mandar eventos.
+    // Melhor esforço: com o token já inválido (erro 190) isso falha, e a
+    // desconexão local precisa acontecer mesmo assim — o worker de webhook
+    // também ignora conta revogada.
+    if (account.wabaId && account.accessTokenEncrypted) {
+      try {
+        const res = await graphFetch(`${GRAPH_BASE}/${account.wabaId}/subscribed_apps`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${decryptToken(account.accessTokenEncrypted)}` },
+        });
+        if (!res.ok) {
+          request.log.warn({ body: await res.json().catch(() => ({})) }, "Meta recusou remover o app da WABA");
+        }
+      } catch (err) {
+        request.log.warn({ err }, "Falha ao remover o app dos webhooks da WABA");
+      }
+    }
+
+    await prisma.tenantWhatsappAccount.update({
+      where: { id: account.id },
+      data: { tokenStatus: "revoked" },
+    });
+
+    return reply.send({ disconnected: true });
   });
 
   // Pede de novo à Meta os contatos e o histórico do WhatsApp Business App
