@@ -8,6 +8,7 @@ export interface RealtimeEnvelope {
     | "message:status"
     | "conversation:read"
     | "conversation:assigned"
+    | "conversation:status"
     // Conexão WhatsApp via API não oficial (Baileys/QR Code) — ver
     // src/whatsapp/baileysManager.ts. Emitidos pro mesmo canal por tenant
     // que o chat, o front só precisa ouvir mais três nomes de evento.

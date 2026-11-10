@@ -247,6 +247,25 @@ export async function dealsRoutes(app: FastifyInstance) {
     }
 
     const deal = await prisma.deal.update({ where: { id }, data: parsed.data });
+
+    if (parsed.data.assignedUserId !== undefined && parsed.data.assignedUserId !== existing.assignedUserId) {
+      await emitAutomationEvent(tenantId, "deal.assigned", {
+        dealId: deal.id,
+        title: deal.title,
+        contactId: deal.contactId,
+        fromUserId: existing.assignedUserId,
+        toUserId: deal.assignedUserId,
+      });
+    }
+    const changedFields = Object.keys(parsed.data).filter((k) => k !== "assignedUserId");
+    if (changedFields.length > 0) {
+      await emitAutomationEvent(tenantId, "deal.updated", {
+        dealId: deal.id,
+        title: deal.title,
+        contactId: deal.contactId,
+        changedFields: changedFields.join(","),
+      });
+    }
     return reply.send(deal);
   });
 
@@ -402,7 +421,11 @@ export async function dealsRoutes(app: FastifyInstance) {
     const deal = await prisma.deal.findFirst({ where: { id: dealId, tenantId, ...dealScope(request) } });
     if (!deal) return reply.status(404).send({ error: "Deal não encontrado" });
 
-    await prisma.dealTag.deleteMany({ where: { dealId, tagId } });
+    const removed = await prisma.dealTag.deleteMany({ where: { dealId, tagId } });
+    if (removed.count > 0) {
+      const tag = await prisma.tag.findFirst({ where: { id: tagId, tenantId } });
+      await emitAutomationEvent(tenantId, "deal.tag_removed", { dealId, tagId, tagName: tag?.name ?? null });
+    }
     return reply.status(204).send();
   });
 

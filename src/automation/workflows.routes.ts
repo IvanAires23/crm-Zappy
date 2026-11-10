@@ -4,11 +4,22 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../db/prisma.js";
 import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 import { actionSchema } from "./rules.routes.js";
-import type { WorkflowGraph } from "./workflow.js";
+import { nodeTargets, stopActiveRuns, type WorkflowGraph } from "./workflow.js";
 
 const filterSchema = z.object({
   field: z.string().min(1),
-  operator: z.enum(["equals", "not_equals", "contains", "not_contains", "includes", "not_includes", "exists", "not_exists"]),
+  operator: z.enum([
+    "equals",
+    "not_equals",
+    "contains",
+    "not_contains",
+    "includes",
+    "not_includes",
+    "exists",
+    "not_exists",
+    "greater_than",
+    "less_than",
+  ]),
   value: z.string().optional(),
 });
 
@@ -23,6 +34,23 @@ const workflowActionSchema = z.union([
   z.object({ type: z.literal("add_contact_tag"), tagName: z.string().trim().min(1, "Informe a etiqueta") }),
   z.object({ type: z.literal("remove_contact_tag"), tagName: z.string().trim().min(1, "Informe a etiqueta") }),
   z.object({ type: z.literal("send_whatsapp_message"), text: z.string().trim().min(1, "Informe a mensagem") }),
+  z.object({ type: z.literal("add_deal_tag"), tagName: z.string().trim().min(1, "Informe a etiqueta") }),
+  z.object({ type: z.literal("remove_deal_tag"), tagName: z.string().trim().min(1, "Informe a etiqueta") }),
+  z.object({ type: z.literal("send_template"), templateId: z.string().min(1, "Escolha o modelo de mensagem") }),
+  z.object({
+    type: z.literal("assign_user"),
+    target: z.enum(["deal", "conversation", "both"]),
+    mode: z.enum(["fixed", "balanced"]),
+    userIds: z.array(z.string().min(1)).min(1, "Escolha pelo menos um usuário"),
+  }),
+  z.object({
+    type: z.literal("update_deal_field"),
+    field: z.string().min(1, "Escolha o campo"),
+    value: z.string().max(2000),
+  }),
+  z.object({ type: z.literal("update_contact"), name: z.string().trim().min(1, "Informe o nome").max(200) }),
+  z.object({ type: z.literal("add_note"), text: z.string().trim().min(1, "Escreva a nota").max(5000) }),
+  z.object({ type: z.literal("close_conversation") }),
 ]);
 
 const nodeSchema = z.discriminatedUnion("type", [
@@ -31,7 +59,17 @@ const nodeSchema = z.discriminatedUnion("type", [
     id: z.string().min(1),
     type: z.literal("wait"),
     minutes: z.number().int().min(1, "A espera precisa ser de pelo menos 1 minuto").max(60 * 24 * 90),
+    mode: z.enum(["duration", "time_of_day"]).optional(),
+    time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Horário inválido (use HH:MM)").optional(),
+    weekdaysOnly: z.boolean().optional(),
     next: z.string().nullable(),
+  }),
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("wait_reply"),
+    timeoutMinutes: z.number().int().min(1, "O prazo precisa ser de pelo menos 1 minuto").max(60 * 24 * 30),
+    next: z.string().nullable(),
+    timeoutNext: z.string().nullable(),
   }),
   z.object({
     id: z.string().min(1),
@@ -95,7 +133,7 @@ function validateGraph(graph: WorkflowGraph): string | null {
   };
 
   for (const node of Object.values(graph.nodes)) {
-    const targets = node.type === "condition" ? [...node.branches.map((b) => b.next), node.elseNext] : [node.next];
+    const targets = nodeTargets(node);
     if (!targets.every(link)) return "Um passo aponta pra outro que não existe";
   }
   if (parents.has(graph.startNodeId)) return "O passo inicial não pode ter um passo antes dele";
@@ -107,8 +145,7 @@ function validateGraph(graph: WorkflowGraph): string | null {
     const id = stack.pop()!;
     if (seen.has(id)) return "O fluxo tem um ciclo";
     seen.add(id);
-    const node = graph.nodes[id];
-    const targets = node.type === "condition" ? [...node.branches.map((b) => b.next), node.elseNext] : [node.next];
+    const targets = nodeTargets(graph.nodes[id]);
     for (const t of targets) if (t) stack.push(t);
   }
   if (seen.size !== ids.length) return "Há passos soltos, sem ligação com o início do fluxo";
@@ -200,6 +237,31 @@ export async function automationWorkflowsRoutes(app: FastifyInstance) {
       prisma.automationWorkflow.delete({ where: { id } }),
     ]);
     return reply.status(204).send();
+  });
+
+  // Duplicar um fluxo (vem desativado) — base pra variações sem mexer no original.
+  app.post("/automation/workflows/:id/duplicate", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const tenantId = request.auth.tenantId;
+    const existing = await prisma.automationWorkflow.findFirst({ where: { id, tenantId } });
+    if (!existing) return reply.status(404).send({ error: "Automação não encontrada" });
+    const copy = await prisma.automationWorkflow.create({
+      data: {
+        tenantId,
+        name: `${existing.name} (cópia)`,
+        allowReentry: existing.allowReentry,
+        triggers: existing.triggers as Prisma.InputJsonValue,
+        graph: existing.graph as Prisma.InputJsonValue,
+      },
+    });
+    return reply.status(201).send(copy);
+  });
+
+  app.post("/automation/workflows/:id/stop-runs", { preHandler: requirePermission("automations.manage") }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const existing = await prisma.automationWorkflow.findFirst({ where: { id, tenantId: request.auth.tenantId } });
+    if (!existing) return reply.status(404).send({ error: "Automação não encontrada" });
+    return reply.send({ stopped: await stopActiveRuns(id) });
   });
 
   // Registros de execução — uma linha por contato/evento inscrito, com o

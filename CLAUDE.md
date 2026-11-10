@@ -43,7 +43,7 @@ Meta (Cloud API) --webhook--> [Fastify /webhook] --enfileira--> [Redis/BullMQ]
 
 Uma pasta por domínio, cada uma com `*.routes.ts` registrado em
 `src/server.ts`: `auth`, `onboarding`, `conversations`, `pipelines`, `deals`,
-`tags`, `contacts`, `tasks`, `calendar`, `automation` (+ `rules.routes.ts`),
+`tags` (+ `POST /tags/bulk` e `/tags/:id/merge`), `contacts`, `tasks`, `calendar`, `automation` (+ `rules.routes.ts`),
 `templates`, `broadcasts`, `customFields`, `dashboard`,
 `integrations/googleCalendar`, `notes`, `quickReplies`, `webhook`.
 
@@ -297,6 +297,29 @@ as regras simples (`AutomationRule`), que continuam funcionando.
   providers (webhook da Cloud API e `baileysManager.ingestIncoming`).
 - Ação de etiqueta feita por fluxo **não** emite `contact.tag_added` (evita
   loop de fluxo disparado por etiqueta).
+- **Passo "Aguardar resposta"** (`wait_reply`, estilo Salesbot do Kommo):
+  run fica `waiting_reply` com `contactId` gravado; o `message.received`
+  do contato retoma por `next` (a resposta vira `{{message.text}}` no
+  contexto) e o job `workflow-reply-timeout` retoma por `timeoutNext`. A
+  trava contra corrida resposta × prazo é o `updateMany` com
+  status+nó atuais em `resumeWaitingRun`. Espera também aceita
+  `mode: "time_of_day"` (até HH:MM de Brasília, opcional só dias úteis).
+- **Contexto/marcadores** vivem em `src/automation/context.ts`
+  (`buildContext` + catálogo `MARKERS`) — usados por filtros, mensagens,
+  templates e disparos. Campo personalizado: `{{deal.fields.<nome>}}`.
+- Nenhuma ação de fluxo emite evento de automação (mesmo motivo do loop).
+
+## Modelos de mensagem (templates, estilo Kommo)
+
+`Template.type`: `waba` (oficial, `{{1}}..{{N}}`, aprovação da Meta via
+`POST /templates/:id/submit` e `POST /templates/sync`) | `internal`
+(texto com marcadores, nasce `approved`, só vale dentro da janela de 24h
+na Cloud API). `variableMap` diz qual marcador preenche cada `{{N}}` —
+atendente, automação (`send_template`) e disparo mandam sem digitar
+variável. Envio centralizado em `sendTemplateToConversation`
+(`src/templates/templateService.ts`); na API não oficial (Baileys) o
+template oficial vira texto renderizado. Template oficial só edita em
+`draft`/`rejected` (igual Kommo), exceto o `variableMap`.
 
 ## Lacunas conhecidas / roadmap
 
