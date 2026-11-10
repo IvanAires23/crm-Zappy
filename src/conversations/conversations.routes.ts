@@ -64,6 +64,10 @@ function extractMessagePreview(message: { direction: string; type: string; conte
     const text = content.text as { body?: string } | undefined;
     return text?.body ?? null;
   }
+  // Clique em botão / item de lista / quick reply de template.
+  const interactive = content.interactive as { button_reply?: { title?: string }; list_reply?: { title?: string } } | undefined;
+  const clicked = interactive?.button_reply?.title ?? interactive?.list_reply?.title ?? (content.button as { text?: string } | undefined)?.text;
+  if (clicked) return clicked;
   return `[${message.type}]`;
 }
 

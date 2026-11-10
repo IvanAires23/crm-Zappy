@@ -94,6 +94,15 @@ const worker = new Worker(
   { connection, concurrency: 10 }
 );
 
+// Texto "lido" da mensagem pros fluxos: clique em botão/lista ou em
+// quick reply de template conta como o título do botão.
+function inboundText(msg: any): string {
+  if (msg.type === "text") return msg.text?.body ?? "";
+  if (msg.type === "interactive") return msg.interactive?.button_reply?.title ?? msg.interactive?.list_reply?.title ?? "";
+  if (msg.type === "button") return msg.button?.text ?? "";
+  return "";
+}
+
 async function findOrCreateOpenConversation(tenantId: string, contactId: string) {
   const existing = await prisma.conversation.findFirst({
     where: { tenantId, contactId, status: { not: "closed" } },
@@ -208,7 +217,9 @@ async function handleInboundMessage(
     contactName: contact.name,
     conversationId: conversation.id,
     channel: "whatsapp",
-    text: msg.type === "text" ? msg.text?.body ?? "" : "",
+    text: inboundText(msg),
+    // id do botão clicado (mensagem interativa / quick reply de template)
+    buttonId: msg.interactive?.button_reply?.id ?? msg.interactive?.list_reply?.id ?? msg.button?.payload ?? null,
     messageType: msg.type,
   });
 

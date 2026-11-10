@@ -3,7 +3,7 @@ import { prisma } from "../db/prisma.js";
 import { automationQueue, outboundQueue } from "../queue/queue.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import { resolveTagId } from "../tags/findOrCreateTag.js";
-import { getTenantProvider } from "../whatsapp/client.js";
+import { getTenantProvider, numberedMenuText } from "../whatsapp/client.js";
 import { isMessagingRestricted } from "../whatsapp/window.js";
 import { sendTemplateToConversation } from "../templates/templateService.js";
 import { executeAction, interpolate, type RuleAction } from "./actions.js";
@@ -87,7 +87,25 @@ export type WorkflowNode =
   // Salesbot "esperar resposta": pausa até o cliente mandar mensagem
   // (segue por next, com {{message.text}} = resposta) ou o tempo acabar
   // (segue por timeoutNext).
-  | { id: string; type: "wait_reply"; timeoutMinutes: number; next: string | null; timeoutNext: string | null };
+  | { id: string; type: "wait_reply"; timeoutMinutes: number; next: string | null; timeoutNext: string | null }
+  // Salesbot "pergunta com botões": manda a mensagem com botões e espera
+  // o clique. Cada botão é um caminho; resposta digitada que não bate com
+  // nenhum vai por otherNext; prazo esgotado, por timeoutNext.
+  | {
+      id: string;
+      type: "ask_buttons";
+      text: string;
+      buttons: ReplyButtonOption[];
+      timeoutMinutes: number;
+      otherNext: string | null;
+      timeoutNext: string | null;
+    };
+
+export interface ReplyButtonOption {
+  id: string;
+  label: string;
+  next: string | null;
+}
 
 export interface WorkflowGraph {
   startNodeId: string | null;
@@ -96,7 +114,7 @@ export interface WorkflowGraph {
 
 export interface RunStep {
   nodeId: string | null;
-  type: "trigger" | "action" | "wait" | "condition" | "wait_reply" | "end";
+  type: "trigger" | "action" | "wait" | "condition" | "wait_reply" | "ask_buttons" | "end";
   status: "success" | "failed" | "info";
   at: string;
   detail?: string;
@@ -105,6 +123,7 @@ export interface RunStep {
 export function nodeTargets(node: WorkflowNode): (string | null)[] {
   if (node.type === "condition") return [...node.branches.map((b) => b.next), node.elseNext];
   if (node.type === "wait_reply") return [node.next, node.timeoutNext];
+  if (node.type === "ask_buttons") return [...node.buttons.map((b) => b.next), node.otherNext, node.timeoutNext];
   return [node.next];
 }
 
@@ -184,7 +203,12 @@ async function contactConversation(tenantId: string, ctx: WorkflowContext) {
   );
 }
 
-async function sendWhatsappMessage(tenantId: string, ctx: WorkflowContext, rawText: string) {
+async function sendWhatsappMessage(
+  tenantId: string,
+  ctx: WorkflowContext,
+  rawText: string,
+  buttons?: { id: string; title: string }[]
+) {
   const text = render(rawText, ctx);
   if (!text) throw new Error("Mensagem vazia depois de substituir as variáveis");
 
@@ -201,8 +225,10 @@ async function sendWhatsappMessage(tenantId: string, ctx: WorkflowContext, rawTe
         tenantId,
         conversationId: conversation.id,
         direction: "outbound",
-        type: "text",
-        content: { text },
+        type: buttons ? "interactive" : "text",
+        // Histórico guarda o menu numerado: é o que o cliente vê na API não
+        // oficial, e na oficial deixa claro quais opções foram oferecidas.
+        content: buttons ? { text: numberedMenuText(text, buttons), buttons: buttons.map((b) => b.title) } : { text },
         status: "pending",
         source: "automation",
       },
@@ -211,7 +237,7 @@ async function sendWhatsappMessage(tenantId: string, ctx: WorkflowContext, rawTe
     return created;
   });
 
-  await outboundQueue.add("send-message", { tenantId, messageId: message.id, to: ctx.contact!.phone, text });
+  await outboundQueue.add("send-message", { tenantId, messageId: message.id, to: ctx.contact!.phone, text, buttons });
   await publishRealtimeEvent({ tenantId, event: "message:new", data: { conversationId: conversation.id, message } });
 }
 
@@ -522,6 +548,32 @@ export async function advanceRun(runId: string, startNodeId: string | null): Pro
       return;
     }
 
+    if (node.type === "ask_buttons") {
+      try {
+        await sendWhatsappMessage(
+          run.tenantId,
+          ctx,
+          node.text,
+          node.buttons.map((b) => ({ id: buttonReplyId(node.id, b.id), title: b.label }))
+        );
+      } catch (err) {
+        const message = (err as Error).message;
+        steps.push(step(node.id, "ask_buttons", "failed", message));
+        await save({ status: "failed", currentNodeId: null, error: message });
+        return;
+      }
+      const delayMs = Math.max(1, node.timeoutMinutes) * 60_000;
+      steps.push(step(node.id, "ask_buttons", "info", `Pergunta enviada — esperando clique até ${describeDelay(delayMs)}`));
+      await save({
+        status: "waiting_reply",
+        currentNodeId: node.id,
+        contactId: ctx.contact!.id,
+        resumeAt: new Date(Date.now() + delayMs),
+      });
+      await automationQueue.add("workflow-reply-timeout", { runId: run.id, nodeId: node.id }, { attempts: 1, delay: delayMs });
+      return;
+    }
+
     if (node.type === "condition") {
       const branch = node.branches.find((b) => matchesFilters(b.filters, ctx, b.match));
       steps.push(step(node.id, "condition", "success", branch ? `Caminho: ${branch.label}` : "Caminho: Nenhuma"));
@@ -558,13 +610,24 @@ async function resumeWaitingRun(
   const run = await prisma.automationWorkflowRun.findUnique({ where: { id: runId }, include: { workflow: true } });
   if (!run || run.status !== "waiting_reply" || run.currentNodeId !== nodeId) return false;
   const node = (run.workflow.graph as unknown as WorkflowGraph).nodes?.[nodeId];
+  const waitingNode = node && (node.type === "wait_reply" || node.type === "ask_buttons") ? node : null;
 
   const steps = [...((run.steps as unknown as RunStep[]) ?? [])];
   const text = typeof reply?.text === "string" ? reply.text : "";
-  steps.push(
-    step(nodeId, "wait_reply", "success", outcome === "replied" ? `Cliente respondeu: "${text.slice(0, 120)}"` : "Sem resposta no prazo")
-  );
-  const next = node && node.type === "wait_reply" ? (outcome === "replied" ? node.next : node.timeoutNext) : null;
+  let next: string | null = null;
+  let detail = outcome === "replied" ? `Cliente respondeu: "${text.slice(0, 120)}"` : "Sem resposta no prazo";
+  if (waitingNode?.type === "wait_reply") {
+    next = outcome === "replied" ? waitingNode.next : waitingNode.timeoutNext;
+  } else if (waitingNode?.type === "ask_buttons") {
+    if (outcome === "timeout") {
+      next = waitingNode.timeoutNext;
+    } else {
+      const clicked = matchButton(waitingNode, text, typeof reply?.buttonId === "string" ? reply.buttonId : null);
+      next = clicked ? clicked.next : waitingNode.otherNext;
+      detail = clicked ? `Cliente escolheu: "${clicked.label}"` : `Outra resposta: "${text.slice(0, 120)}"`;
+    }
+  }
+  steps.push(step(nodeId, waitingNode?.type ?? "wait_reply", "success", detail));
   // A resposta vira o message.text do contexto daqui pra frente — é assim
   // que uma condição ou "Atualizar campo" usa o que o cliente escreveu.
   const triggerData = outcome === "replied" ? { ...(run.triggerData as Record<string, unknown>), ...reply } : undefined;
@@ -581,7 +644,7 @@ async function resumeWaitingRun(
   });
   if (claimed.count === 0) return false;
 
-  if (!node || node.type !== "wait_reply") {
+  if (!waitingNode) {
     await prisma.automationWorkflowRun.update({
       where: { id: runId },
       data: { status: "failed", error: "Passo removido do fluxo", currentNodeId: null },
@@ -590,6 +653,39 @@ async function resumeWaitingRun(
   }
   await enqueueWorkflowStep(runId, next);
   return true;
+}
+
+// id que vai no botão da Cloud API e volta no clique — prefixado pelo nó
+// pra um clique num botão de uma pergunta antiga não valer na atual.
+function buttonReplyId(nodeId: string, buttonId: string) {
+  return `${nodeId}:${buttonId}`;
+}
+
+const normalizeAnswer = (v: string) =>
+  v
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/, "");
+
+// Clique (id do botão) ganha; senão aceita o texto do botão ou o número
+// da opção ("1", "2"...) — é como o cliente responde no menu numerado da
+// API não oficial, ou quando digita em vez de clicar.
+export function matchButton(
+  node: Extract<WorkflowNode, { type: "ask_buttons" }>,
+  text: string,
+  buttonId: string | null
+): ReplyButtonOption | null {
+  if (buttonId) {
+    const byId = node.buttons.find((b) => buttonReplyId(node.id, b.id) === buttonId);
+    if (byId) return byId;
+  }
+  const answer = normalizeAnswer(text);
+  if (!answer) return null;
+  const index = /^\d+$/.test(answer) ? Number(answer) - 1 : -1;
+  if (index >= 0 && index < node.buttons.length) return node.buttons[index];
+  return node.buttons.find((b) => normalizeAnswer(b.label) === answer) ?? null;
 }
 
 export async function handleReplyTimeout(runId: string, nodeId: string) {
@@ -611,6 +707,7 @@ async function resumeRunsWaitingReply(tenantId: string, data: Record<string, unk
     if (!run.currentNodeId) continue;
     const ok = await resumeWaitingRun(run.id, run.currentNodeId, "replied", {
       text: data.text ?? "",
+      buttonId: data.buttonId ?? null,
       messageType: data.messageType ?? "text",
       channel: data.channel ?? "whatsapp",
       conversationId: data.conversationId,
