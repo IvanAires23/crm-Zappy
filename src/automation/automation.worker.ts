@@ -5,7 +5,7 @@ import { connection, schedulerQueue, outboundQueue } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
 import { emitAutomationEvent } from "./emit.js";
 import { executeAction, type RuleAction } from "./actions.js";
-import { advanceRun } from "./workflow.js";
+import { advanceRun, handleReplyTimeout } from "./workflow.js";
 import { pullAllConnectedGoogleCalendars } from "../integrations/googleCalendar/googleCalendarSync.js";
 import { isMessagingRestricted } from "../whatsapp/window.js";
 import { getTenantProvider } from "../whatsapp/client.js";
@@ -85,6 +85,9 @@ const dispatchWorker = new Worker(
     if (job.name === "workflow-step") {
       const { runId, nodeId } = job.data as { runId: string; nodeId: string | null };
       await advanceRun(runId, nodeId);
+    } else if (job.name === "workflow-reply-timeout") {
+      const { runId, nodeId } = job.data as { runId: string; nodeId: string };
+      await handleReplyTimeout(runId, nodeId);
     } else if (job.name === "execute-rule") {
       await handleRuleExecution(job as Job<ExecuteRuleJobData>);
     } else {
@@ -99,13 +102,13 @@ dispatchWorker.on("failed", async (job, err) => {
 
   Sentry.captureException(err, { extra: { jobId: job.id, jobName: job.name } });
 
-  if (job.name === "workflow-step") {
+  if (job.name === "workflow-step" || job.name === "workflow-reply-timeout") {
     // advanceRun já registra falha de ação no log da execução — aqui só
     // cai erro inesperado (banco fora, etc.), que não deixa a execução
     // presa em "running" pra sempre.
     const { runId } = job.data as { runId: string };
     await prisma.automationWorkflowRun.updateMany({
-      where: { id: runId, status: { in: ["running", "waiting"] } },
+      where: { id: runId, status: { in: ["running", "waiting", "waiting_reply"] } },
       data: { status: "failed", error: err.message },
     });
     logger.error({ jobId: job.id, err }, "Falha inesperada ao executar passo de fluxo de automação");

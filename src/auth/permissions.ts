@@ -75,6 +75,13 @@ export const PERMISSIONS: PermissionDef[] = [
   { key: "chatbot.manage", group: "Automações", label: "Gerenciar chatbot", defaults: adminOnly },
 
   { key: "quick_replies.manage", group: "Configurações", label: "Gerenciar respostas rápidas", defaults: adminOnly },
+  {
+    key: "templates.manage",
+    group: "Configurações",
+    label: "Gerenciar modelos de mensagem",
+    description: "Criar modelos internos e templates oficiais, enviar pra aprovação da Meta e sincronizar.",
+    defaults: adminOnly,
+  },
   { key: "tags.manage", group: "Configurações", label: "Renomear e apagar etiquetas", defaults: adminOnly },
   { key: "data.export", group: "Configurações", label: "Exportar dados (CSV)", defaults: adminOnly },
 

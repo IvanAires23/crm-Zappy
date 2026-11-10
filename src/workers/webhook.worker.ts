@@ -3,7 +3,7 @@ import { connection, outboundQueue } from "../queue/queue.js";
 import { prisma } from "../db/prisma.js";
 import { initSentry, Sentry } from "../config/sentry.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
-import { emitAutomationEvent } from "../automation/emit.js";
+import { emitAutomationEvent, emitConversationStartEvents } from "../automation/emit.js";
 import pino from "pino";
 import { describeMetaError } from "../whatsapp/errors.js";
 import type { Prisma } from "@prisma/client";
@@ -131,6 +131,10 @@ async function handleInboundMessage(
   const fromPhone: string = msg.from; // já vem em formato internacional
   const contactName: string | undefined = value.contacts?.[0]?.profile?.name;
 
+  const isNewContact = !(await prisma.contact.findUnique({
+    where: { tenantId_phone: { tenantId, phone: fromPhone } },
+    select: { id: true },
+  }));
   const contact = await upsertContact({
     where: { tenantId_phone: { tenantId, phone: fromPhone } },
     create: { tenantId, phone: fromPhone, name: contactName },
@@ -141,6 +145,7 @@ async function handleInboundMessage(
     where: { tenantId, contactId: contact.id, status: { not: "closed" } },
   });
 
+  const isNewConversation = !conversation;
   if (!conversation) {
     conversation = await prisma.conversation.create({
       data: { tenantId, contactId: contact.id, status: "open" },
@@ -189,6 +194,14 @@ async function handleInboundMessage(
 
   logger.info({ tenantId, conversationId: conversation.id }, "Mensagem inbound processada");
 
+  await emitConversationStartEvents(tenantId, {
+    isNewContact,
+    isNewConversation,
+    contactId: contact.id,
+    contactPhone: contact.phone,
+    contactName: contact.name,
+    conversationId: conversation.id,
+  });
   await emitAutomationEvent(tenantId, "message.received", {
     contactId: contact.id,
     contactPhone: contact.phone,

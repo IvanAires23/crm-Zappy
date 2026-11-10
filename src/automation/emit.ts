@@ -54,3 +54,22 @@ export async function emitAutomationEvent(
 
   await enrollInWorkflows(tenantId, event, data);
 }
+
+// Primeiro contato (estilo "lead de entrada" do Kommo): contato novo e/ou
+// conversa nova aberta por mensagem do cliente. Emitido antes do
+// message.received da mesma mensagem.
+export async function emitConversationStartEvents(
+  tenantId: string,
+  data: {
+    isNewContact: boolean;
+    isNewConversation: boolean;
+    contactId: string;
+    contactPhone: string;
+    contactName: string | null;
+    conversationId: string;
+  }
+) {
+  const { isNewContact, isNewConversation, ...payload } = data;
+  if (isNewContact) await emitAutomationEvent(tenantId, "contact.created", { ...payload, source: "whatsapp" });
+  if (isNewConversation) await emitAutomationEvent(tenantId, "conversation.created", { ...payload, isNewContact });
+}

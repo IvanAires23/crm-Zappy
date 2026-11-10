@@ -8,7 +8,7 @@ import QRCode from "qrcode";
 import pino from "pino";
 import { prisma } from "../db/prisma.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
-import { emitAutomationEvent } from "../automation/emit.js";
+import { emitAutomationEvent, emitConversationStartEvents } from "../automation/emit.js";
 import { usePostgresAuthState } from "./baileysAuthState.js";
 import { clearLastError, clearLatestQr, setLastError, setLatestQr } from "./baileysRuntime.js";
 
@@ -210,12 +210,20 @@ async function ingestIncoming(tenantId: string, msg: any) {
   // Em mensagem mandada pelo próprio celular (fromMe) o pushName é o nome
   // do DONO do número, não do contato — usar ele renomeava o contato.
   const profileName: string | undefined = fromMe ? undefined : msg.pushName || msg.verifiedBizName || undefined;
+  const isNewContact = !(await prisma.contact.findUnique({
+    where: { tenantId_phone: { tenantId, phone } },
+    select: { id: true },
+  }));
   const contact = await prisma.contact.upsert({
     where: { tenantId_phone: { tenantId, phone } },
     create: { tenantId, phone, name: profileName },
     update: profileName ? { name: profileName } : {},
   });
 
+  const isNewConversation = !(await prisma.conversation.findFirst({
+    where: { tenantId, contactId: contact.id, status: { not: "closed" } },
+    select: { id: true },
+  }));
   const conversation = await findOrCreateOpenConversation(tenantId, contact.id);
 
   const message = await prisma.message.create({
@@ -256,6 +264,14 @@ async function ingestIncoming(tenantId: string, msg: any) {
   });
 
   if (direction === "inbound") {
+    await emitConversationStartEvents(tenantId, {
+      isNewContact,
+      isNewConversation,
+      contactId: contact.id,
+      contactPhone: contact.phone,
+      contactName: contact.name,
+      conversationId: conversation.id,
+    });
     await emitAutomationEvent(tenantId, "message.received", {
       contactId: contact.id,
       contactPhone: contact.phone,

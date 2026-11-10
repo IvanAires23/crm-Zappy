@@ -314,10 +314,25 @@ model Template {
   tenant     Tenant   @relation(fields: [tenantId], references: [id])
 
   name       String
-  category   String
+  // "waba" = template oficial da Meta (precisa de aprovação, vale fora da
+  // janela de 24h); "internal" = modelo interno do CRM (estilo Kommo: texto
+  // com marcadores {{contact.name}}, enviado como texto livre).
+  type       String   @default("waba")
+  category   String   // MARKETING | UTILITY | AUTHENTICATION (waba) — livre pra internal
   language   String   @default("pt_BR")
+  headerText String?  // cabeçalho de texto (waba) — pode ter {{1}}
   bodyText   String
-  metaStatus String   @default("pending") // pending | approved | rejected
+  footerText String?
+  // [{ type: "QUICK_REPLY" | "URL" | "PHONE_NUMBER", text, url?, phone? }]
+  buttons    Json     @default("[]")
+  // Marcador do CRM que preenche cada {{N}} do corpo, na ordem:
+  // ["{{contact.name}}", "{{deal.title}}"]. É o que deixa automação e
+  // atendente mandarem o template sem digitar variável na mão.
+  variableMap Json    @default("[]")
+  // draft (ainda não enviado à Meta) | pending | approved | rejected | paused | disabled
+  metaStatus String   @default("pending")
+  metaTemplateId String?
+  rejectedReason String?
 
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt

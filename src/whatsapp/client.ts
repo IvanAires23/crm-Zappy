@@ -60,6 +60,7 @@ async function getTenantCredentials(tenantId: string) {
 
   return {
     phoneNumberId: account.phoneNumberId,
+    wabaId: account.wabaId,
     accessToken: decryptToken(account.accessTokenEncrypted),
   };
 }
@@ -237,6 +238,73 @@ export async function sendTemplateMessage(
       components: components ?? [],
     },
   });
+}
+
+// --- Gestão de templates na WABA (message_templates) ---
+
+async function getWabaCredentials(tenantId: string) {
+  const creds = await getTenantCredentials(tenantId);
+  if (!creds.wabaId) throw new Error("Conta oficial conectada sem WABA ID — reconecte o WhatsApp");
+  return { wabaId: creds.wabaId, accessToken: creds.accessToken };
+}
+
+export interface MetaTemplate {
+  id: string;
+  name: string;
+  status: string; // APPROVED | PENDING | REJECTED | PAUSED | DISABLED | IN_APPEAL
+  category: string;
+  language: string;
+  rejected_reason?: string;
+  components?: {
+    type: string;
+    format?: string;
+    text?: string;
+    buttons?: { type: string; text: string; url?: string; phone_number?: string }[];
+  }[];
+}
+
+export async function createMetaTemplate(tenantId: string, payload: Record<string, unknown>) {
+  const { wabaId, accessToken } = await getWabaCredentials(tenantId);
+  return graphRequest(`${wabaId}/message_templates`, accessToken, payload) as Promise<{
+    id: string;
+    status: string;
+    category: string;
+  }>;
+}
+
+export async function listMetaTemplates(tenantId: string): Promise<MetaTemplate[]> {
+  const { wabaId, accessToken } = await getWabaCredentials(tenantId);
+  const all: MetaTemplate[] = [];
+  let path: string | null =
+    `${wabaId}/message_templates?fields=id,name,status,category,language,components,rejected_reason&limit=100`;
+  // A Graph pagina por cursor; o `next` já vem com a URL completa.
+  for (let page = 0; path && page < 20; page++) {
+    const json = (await graphGet(path, accessToken)) as { data: MetaTemplate[]; paging?: { next?: string } };
+    all.push(...json.data);
+    path = json.paging?.next ? json.paging.next.replace(`${GRAPH_BASE}/`, "") : null;
+  }
+  return all;
+}
+
+export async function deleteMetaTemplate(tenantId: string, name: string, metaTemplateId?: string | null) {
+  const { wabaId, accessToken } = await getWabaCredentials(tenantId);
+  const qs = new URLSearchParams({ name, ...(metaTemplateId ? { hsm_id: metaTemplateId } : {}) });
+  const res = await fetch(`${GRAPH_BASE}/${wabaId}/message_templates?${qs}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new WhatsappApiError(res.status, json);
+  return json;
+}
+
+// Mensagem legível de um erro da Graph API (error_user_msg > message).
+export function graphErrorMessage(err: unknown): string {
+  if (err instanceof WhatsappApiError) {
+    const e = (err.body as { error?: { error_user_msg?: string; error_user_title?: string; message?: string } })?.error;
+    return e?.error_user_msg || e?.message || err.message;
+  }
+  return (err as Error).message;
 }
 
 export { WhatsappApiError };

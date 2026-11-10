@@ -67,6 +67,16 @@ export async function contactsRoutes(app: FastifyInstance) {
       conversation = await prisma.conversation.create({ data: { tenantId, contactId: contact.id, status: "open" } });
     }
 
+    if (isNewContact) {
+      await emitAutomationEvent(tenantId, "contact.created", {
+        contactId: contact.id,
+        contactPhone: contact.phone,
+        contactName: contact.name,
+        conversationId: conversation.id,
+        source: "manual",
+      });
+    }
+
     const provider = await getTenantProvider(tenantId);
 
     return reply.status(isNewContact ? 201 : 200).send({
@@ -182,7 +192,17 @@ export async function contactsRoutes(app: FastifyInstance) {
     const contact = await prisma.contact.findFirst({ where: { id: contactId, tenantId } });
     if (!contact) return reply.status(404).send({ error: "Contato não encontrado" });
 
-    await prisma.contactTag.deleteMany({ where: { contactId, tagId } });
+    const removed = await prisma.contactTag.deleteMany({ where: { contactId, tagId } });
+    if (removed.count > 0) {
+      const tag = await prisma.tag.findFirst({ where: { id: tagId, tenantId } });
+      await emitAutomationEvent(tenantId, "contact.tag_removed", {
+        contactId,
+        contactPhone: contact.phone,
+        contactName: contact.name,
+        tagId,
+        tagName: tag?.name ?? null,
+      });
+    }
     return reply.status(204).send();
   });
 }

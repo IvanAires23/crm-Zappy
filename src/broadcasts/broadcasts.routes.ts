@@ -3,6 +3,9 @@ import { z } from "zod";
 import { prisma } from "../db/prisma.js";
 import { authenticate, requirePermission } from "../auth/auth.plugin.js";
 import { outboundQueue } from "../queue/queue.js";
+import { buildContext } from "../automation/context.js";
+import { getTenantProvider } from "../whatsapp/client.js";
+import { renderTemplateText, resolveVariables } from "../templates/templateService.js";
 
 const createBroadcastSchema = z
   .object({
@@ -39,6 +42,15 @@ export async function broadcastsRoutes(app: FastifyInstance) {
     if (template.metaStatus !== "approved") {
       return reply.status(400).send({ error: "Só é possível disparar templates aprovados pela Meta" });
     }
+    // Template oficial só na Cloud API; modelo interno (ou qualquer um na
+    // API não oficial) vai como texto, personalizado por contato.
+    const provider = await getTenantProvider(tenantId);
+    const asOfficialTemplate = template.type === "waba" && provider === "cloud_api";
+    if (template.type === "internal" && provider === "cloud_api") {
+      return reply.status(400).send({
+        error: "Na API oficial, disparo em massa só com template aprovado pela Meta (modelo interno seria recusado fora da janela de 24h)",
+      });
+    }
 
     const contacts = tagId
       ? await prisma.contact.findMany({ where: { tenantId, tags: { some: { tagId } } } })
@@ -60,13 +72,20 @@ export async function broadcastsRoutes(app: FastifyInstance) {
     for (const contact of contacts) {
       const conversation = await getOrCreateConversation(tenantId, contact.id);
 
+      const ctx = await buildContext(tenantId, "broadcast", { contactId: contact.id, conversationId: conversation.id });
+      const values = resolveVariables(template, ctx);
+      const text = renderTemplateText(template, ctx, values);
+      const components = values.length
+        ? [{ type: "body", parameters: values.map((v) => ({ type: "text", text: v || "-" })) }]
+        : undefined;
+
       const message = await prisma.message.create({
         data: {
           tenantId,
           conversationId: conversation.id,
           direction: "outbound",
-          type: "template",
-          content: { templateName: template.name, language: template.language },
+          type: asOfficialTemplate ? "template" : "text",
+          content: { templateName: template.name, language: template.language, text },
           status: "pending",
         },
       });
@@ -79,7 +98,9 @@ export async function broadcastsRoutes(app: FastifyInstance) {
         tenantId,
         messageId: message.id,
         to: contact.phone,
-        template: { name: template.name, languageCode: template.language },
+        ...(asOfficialTemplate
+          ? { template: { name: template.name, languageCode: template.language, components } }
+          : { text }),
         broadcastRecipientId: recipient.id,
       });
     }

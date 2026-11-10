@@ -68,6 +68,21 @@ const EVENT_CATALOG = [
     fields: ["contactId", "contactPhone", "contactName", "conversationId", "channel", "text"],
   },
   {
+    event: "conversation.created",
+    description: "Quando um cliente abre uma conversa nova (lead de entrada)",
+    fields: ["contactId", "contactPhone", "contactName", "conversationId", "isNewContact"],
+  },
+  {
+    event: "contact.created",
+    description: "Quando um contato novo é cadastrado (por mensagem ou manualmente)",
+    fields: ["contactId", "contactPhone", "contactName", "conversationId", "source"],
+  },
+  {
+    event: "conversation.assigned",
+    description: "Quando o responsável por uma conversa muda",
+    fields: ["conversationId", "contactId", "fromUserId", "toUserId"],
+  },
+  {
     event: "deal.created",
     description: "Quando um novo deal é criado",
     fields: ["dealId", "title", "pipelineId", "stageId", "contactId"],
@@ -86,6 +101,26 @@ const EVENT_CATALOG = [
     event: "deal.tag_added",
     description: "Quando uma tag é adicionada a um deal",
     fields: ["dealId", "tagId", "tagName"],
+  },
+  {
+    event: "deal.tag_removed",
+    description: "Quando uma tag é removida de um deal",
+    fields: ["dealId", "tagId", "tagName"],
+  },
+  {
+    event: "deal.assigned",
+    description: "Quando o responsável por um deal muda",
+    fields: ["dealId", "title", "contactId", "fromUserId", "toUserId"],
+  },
+  {
+    event: "deal.updated",
+    description: "Quando dados de um deal são editados (título, valor, campos personalizados...)",
+    fields: ["dealId", "title", "contactId", "changedFields"],
+  },
+  {
+    event: "contact.tag_removed",
+    description: "Quando uma tag é removida de um contato",
+    fields: ["contactId", "contactPhone", "contactName", "tagId", "tagName"],
   },
   {
     event: "contact.tag_added",

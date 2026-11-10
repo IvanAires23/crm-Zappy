@@ -6,6 +6,8 @@ import { outboundQueue } from "../queue/queue.js";
 import { publishRealtimeEvent } from "../realtime/bus.js";
 import { uploadMedia, getTenantProvider } from "../whatsapp/client.js";
 import { isWithinWindow, isMessagingRestricted } from "../whatsapp/window.js";
+import { sendTemplateToConversation, TemplateSendError } from "../templates/templateService.js";
+import { emitAutomationEvent } from "../automation/emit.js";
 
 function whatsappTypeForMime(mimeType: string): "image" | "video" | "audio" | "document" {
   if (mimeType.startsWith("image/")) return "image";
@@ -254,56 +256,21 @@ export async function conversationsRoutes(app: FastifyInstance) {
     if (!template) {
       return reply.status(404).send({ error: "Template não encontrado" });
     }
-    if (template.metaStatus !== "approved") {
-      return reply.status(409).send({ error: "Esse template ainda não foi aprovado pela Meta" });
+
+    // Variáveis não informadas saem dos marcadores do template
+    // (variableMap) — ver sendTemplateToConversation.
+    try {
+      const message = await sendTemplateToConversation({
+        tenantId: request.auth.tenantId,
+        conversationId: conversation.id,
+        template,
+        variables: body.data.variables,
+      });
+      return reply.status(201).send(message);
+    } catch (err) {
+      if (err instanceof TemplateSendError) return reply.status(err.status).send({ error: err.message });
+      throw err;
     }
-
-    const variables = body.data.variables ?? [];
-    // Guarda o texto já substituído localmente pra prévia/histórico — o que
-    // vai pra Meta são os "components" com os parâmetros separados.
-    const renderedText = template.bodyText.replace(
-      /\{\{(\d+)\}\}/g,
-      (match, index) => variables[Number(index) - 1] ?? match
-    );
-    const components =
-      variables.length > 0
-        ? [{ type: "body", parameters: variables.map((text) => ({ type: "text", text })) }]
-        : undefined;
-
-    const message = await prisma.$transaction(async (tx) => {
-      const created = await tx.message.create({
-        data: {
-          tenantId: request.auth.tenantId,
-          conversationId: conversation.id,
-          direction: "outbound",
-          type: "template",
-          content: { templateName: template.name, text: renderedText },
-          status: "pending",
-        },
-      });
-
-      await tx.conversation.update({
-        where: { id: conversation.id },
-        data: { lastMessageAt: new Date() },
-      });
-
-      return created;
-    });
-
-    await outboundQueue.add("send-message", {
-      tenantId: request.auth.tenantId,
-      messageId: message.id,
-      to: conversation.contact.phone,
-      template: { name: template.name, languageCode: template.language, components },
-    });
-
-    await publishRealtimeEvent({
-      tenantId: request.auth.tenantId,
-      event: "message:new",
-      data: { conversationId: conversation.id, message },
-    });
-
-    return reply.status(201).send(message);
   });
 
   // Envia mídia (imagem/áudio/vídeo/documento) nessa conversa — multipart,
@@ -536,6 +503,15 @@ export async function conversationsRoutes(app: FastifyInstance) {
       data: { assignedUserId: body.data.userId },
       include: { assignedUser: { select: { id: true, name: true } } },
     });
+
+    if (updated.assignedUserId !== conversation.assignedUserId) {
+      await emitAutomationEvent(request.auth.tenantId, "conversation.assigned", {
+        conversationId: conversation.id,
+        contactId: conversation.contactId,
+        fromUserId: conversation.assignedUserId,
+        toUserId: updated.assignedUserId,
+      });
+    }
 
     await publishRealtimeEvent({
       tenantId: request.auth.tenantId,
