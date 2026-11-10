@@ -66,6 +66,27 @@ const nodeSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     id: z.string().min(1),
+    type: z.literal("ask_buttons"),
+    text: z.string().trim().min(1, "Escreva a pergunta").max(1024, "Pergunta: no máximo 1024 caracteres"),
+    buttons: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          label: z.string().trim().min(1, "Dê um texto a cada botão").max(20, "Botão: no máximo 20 caracteres"),
+          next: z.string().nullable(),
+        })
+      )
+      .min(1, "Adicione pelo menos um botão")
+      .max(10, "No máximo 10 botões")
+      .refine((bs) => new Set(bs.map((b) => b.label.trim().toLowerCase())).size === bs.length, {
+        message: "Dois botões com o mesmo texto",
+      }),
+    timeoutMinutes: z.number().int().min(1, "O prazo precisa ser de pelo menos 1 minuto").max(60 * 24 * 30),
+    otherNext: z.string().nullable(),
+    timeoutNext: z.string().nullable(),
+  }),
+  z.object({
+    id: z.string().min(1),
     type: z.literal("wait_reply"),
     timeoutMinutes: z.number().int().min(1, "O prazo precisa ser de pelo menos 1 minuto").max(60 * 24 * 30),
     next: z.string().nullable(),

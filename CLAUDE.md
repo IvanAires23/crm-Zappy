@@ -307,6 +307,14 @@ as regras simples (`AutomationRule`), que continuam funcionando.
 - **Contexto/marcadores** vivem em `src/automation/context.ts`
   (`buildContext` + catálogo `MARKERS`) — usados por filtros, mensagens,
   templates e disparos. Campo personalizado: `{{deal.fields.<nome>}}`.
+- **Pergunta com botões** (`ask_buttons`, botões do Salesbot): manda a
+  mensagem com botões e espera como o `wait_reply`; cada botão tem seu
+  `next`, resposta que não bate vai por `otherNext`, prazo por
+  `timeoutNext`. Cloud API: ≤3 = botões nativos, 4–10 = lista
+  (`sendButtonsMessage`); Baileys: menu numerado. O id do botão é
+  `<nodeId>:<buttonId>` e volta em `buttonId` no `message.received`
+  (webhook lê `interactive.button_reply`/`list_reply`/`button`);
+  `matchButton` também aceita o número ou o texto da opção.
 - Nenhuma ação de fluxo emite evento de automação (mesmo motivo do loop).
 
 ## Modelos de mensagem (templates, estilo Kommo)

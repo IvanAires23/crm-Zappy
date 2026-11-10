@@ -153,6 +153,51 @@ export async function sendTextMessage(tenantId: string, to: string, text: string
   });
 }
 
+export interface ReplyButton {
+  id: string;
+  title: string;
+}
+
+// Menu numerado — usado na API não oficial (WhatsApp Web não entrega
+// botões interativos de forma confiável) e guardado como texto da mensagem.
+export function numberedMenuText(text: string, buttons: ReplyButton[]): string {
+  return `${text}\n\n${buttons.map((b, i) => `${i + 1} - ${b.title}`).join("\n")}`;
+}
+
+// Mensagem com botões de resposta (Salesbot). Cloud API: até 3 = botões
+// nativos (título até 20 caracteres); 4 a 10 = lista. Só vale dentro da
+// janela de 24h, igual texto livre.
+export async function sendButtonsMessage(tenantId: string, to: string, text: string, buttons: ReplyButton[]) {
+  const account = await getTenantAccount(tenantId);
+  if (account.provider === "baileys") {
+    return sendTextViaUnofficial(tenantId, to, numberedMenuText(text, buttons));
+  }
+
+  const { phoneNumberId, accessToken } = await getTenantCredentials(tenantId);
+  const interactive =
+    buttons.length <= 3
+      ? {
+          type: "button",
+          body: { text },
+          action: { buttons: buttons.map((b) => ({ type: "reply", reply: { id: b.id, title: b.title.slice(0, 20) } })) },
+        }
+      : {
+          type: "list",
+          body: { text },
+          action: {
+            button: "Ver opções",
+            sections: [{ title: "Opções", rows: buttons.map((b) => ({ id: b.id, title: b.title.slice(0, 24) })) }],
+          },
+        };
+
+  return graphRequest(`${phoneNumberId}/messages`, accessToken, {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive,
+  });
+}
+
 // Sobe o arquivo pro Meta e devolve o media id — a mensagem em si é enviada
 // depois com sendMediaMessage() referenciando esse id (a Meta hospeda o
 // arquivo, não guardamos cópia nenhuma do nosso lado).
